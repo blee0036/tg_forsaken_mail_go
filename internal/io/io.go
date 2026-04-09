@@ -34,6 +34,7 @@ type IO struct {
 	blockSender   *lrucache.Cache
 	blockReceiver *lrucache.Cache
 	blockCache    *lrucache.Cache
+	langCache     *lrucache.Cache
 	snowflakeNode *snowflake.Node
 	// UploadHTMLFunc is an optional function for uploading HTML content.
 	// It takes HTML bytes and returns a uuid string (empty on failure) and an error.
@@ -55,6 +56,7 @@ func New(database *db.DB, cfg *config.Config) *IO {
 		blockSender:   lrucache.New(1024),
 		blockReceiver: lrucache.New(1024),
 		blockCache:    lrucache.New(9000),
+		langCache:     lrucache.New(256),
 		snowflakeNode: node,
 	}
 }
@@ -647,4 +649,27 @@ func (o *IO) SendAll(msg string) {
 	for tgID := range allUsers {
 		o.sendHTMLMessage(tgID, msg)
 	}
+}
+
+// GetUserLang returns the stored language preference for a user.
+// Uses LRU cache to avoid repeated DB queries.
+// Returns empty string if not set (caller should fall back to Telegram's language_code).
+func (o *IO) GetUserLang(tgID int64) string {
+	key := fmt.Sprintf("%d", tgID)
+	if val, found := o.langCache.Get(key); found {
+		return val.(string)
+	}
+	lang := o.db.GetUserLang(tgID)
+	o.langCache.Set(key, lang)
+	return lang
+}
+
+// SetUserLang stores the language preference for a user and updates the cache.
+func (o *IO) SetUserLang(tgID int64, lang string) error {
+	err := o.db.SetUserLang(tgID, lang)
+	if err == nil {
+		key := fmt.Sprintf("%d", tgID)
+		o.langCache.Set(key, lang)
+	}
+	return err
 }
