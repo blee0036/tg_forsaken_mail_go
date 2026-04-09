@@ -261,6 +261,22 @@ var defaultTexts = map[string]LangTexts{
 		EN: "<b>Your domains:</b>",
 		ZH: "<b>你的域名：</b>",
 	},
+	"btn_main_menu": {
+		EN: "🏠 Main Menu",
+		ZH: "🏠 主菜单",
+	},
+	"btn_lang": {
+		EN: "🌐 Language",
+		ZH: "🌐 语言",
+	},
+	"msg_lang_select": {
+		EN: "Choose your language / 选择语言：",
+		ZH: "Choose your language / 选择语言：",
+	},
+	"msg_lang_set": {
+		EN: "✅ Language set to English.",
+		ZH: "✅ 语言已设置为中文。",
+	},
 }
 
 // GenerateHelpMessages generates the English and Chinese help messages with the given mail domain.
@@ -402,6 +418,7 @@ func (b *Bot) registerCommands() error {
 		tgbotapi.BotCommand{Command: "list_block_domain", Description: "List blocked domains"},
 		tgbotapi.BotCommand{Command: "list_block_sender", Description: "List blocked senders"},
 		tgbotapi.BotCommand{Command: "list_block_receiver", Description: "List blocked receivers"},
+		tgbotapi.BotCommand{Command: "lang", Description: "Set language / 设置语言"},
 	)
 	_, err := b.sender.Request(commands)
 	if err != nil {
@@ -438,7 +455,7 @@ func (b *Bot) Start() {
 // Uses decodeCallback to parse callback data and routes to specific handlers.
 func (b *Bot) handleCallbackQuery(callbackQuery *tgbotapi.CallbackQuery) {
 	cb := b.decodeCallback(callbackQuery.Data)
-	lang := detectLanguage(callbackQuery.From)
+	lang := b.detectLanguage(callbackQuery.From)
 
 	switch cb.Action {
 	case "quick_start":
@@ -513,6 +530,14 @@ func (b *Bot) handleCallbackQuery(callbackQuery *tgbotapi.CallbackQuery) {
 			param = cb.Params[0]
 		}
 		b.handleBlockCategory(callbackQuery, lang, param)
+	case "set_lang":
+		param := ""
+		if len(cb.Params) > 0 {
+			param = cb.Params[0]
+		}
+		b.handleSetLang(callbackQuery, param)
+	case "go_main":
+		b.handleGoMain(callbackQuery, lang)
 	default:
 		b.answerCallbackQuery(callbackQuery.ID, b.getText("err_unknown_cmd", lang), true)
 	}
@@ -526,7 +551,7 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 	}
 
 	cmd := parseCommand(msg.Text)
-	lang := detectLanguage(msg.From)
+	lang := b.detectLanguage(msg.From)
 
 	switch cmd.Command {
 	case "start":
@@ -553,6 +578,8 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 		b.handleListBlock(msg, lang, "receiver")
 	case "send_all":
 		b.handleSendAll(msg, cmd.Args)
+	case "lang":
+		b.handleLang(msg)
 	default:
 		// Unknown command: send friendly prompt with "View Help" button
 		keyboard := tgbotapi.NewInlineKeyboardMarkup(
@@ -627,6 +654,12 @@ func (b *Bot) handleStart(msg *tgbotapi.Message, lang string) {
 					b.encodeCallback("main_menu", "help"),
 				),
 			),
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData(
+					b.getText("btn_lang", lang),
+					b.encodeCallback("main_menu", "lang"),
+				),
+			),
 		)
 		b.sendHTMLWithKeyboard(msg.Chat.ID, b.getText("welcome_back", lang), keyboard)
 	}
@@ -654,6 +687,7 @@ func (b *Bot) handleHelp(msg *tgbotapi.Message, lang string) {
 				b.encodeCallback("help_cat", "other"),
 			),
 		),
+		b.mainMenuBackRow(lang),
 	)
 	b.sendHTMLWithKeyboard(msg.Chat.ID, b.getText("help_title", lang), keyboard)
 }
@@ -776,7 +810,7 @@ func (b *Bot) handleSendAll(msg *tgbotapi.Message, args []string) {
 	message := strings.Join(args, " ")
 	b.io.SendAll(message)
 
-	lang := detectLanguage(msg.From)
+	lang := b.detectLanguage(msg.From)
 	b.sendHTMLMessage(msg.Chat.ID, b.getText("msg_broadcast_done", lang))
 }
 
@@ -805,9 +839,26 @@ func (b *Bot) sendHTMLMessage(chatID int64, text string) {
 	}
 }
 
-// detectLanguage detects the user's language preference from their Telegram profile.
-// Returns "zh" if the user's LanguageCode starts with "zh" (case-insensitive), otherwise "en".
-func detectLanguage(user *tgbotapi.User) string {
+// detectLanguage detects the user's language preference.
+// Priority: 1) DB-stored preference, 2) Telegram LanguageCode, 3) default "en".
+func (b *Bot) detectLanguage(user *tgbotapi.User) string {
+	if user == nil {
+		return "en"
+	}
+	// Check DB-stored preference first
+	if b.io != nil {
+		if stored := b.io.GetUserLang(user.ID); stored != "" {
+			return stored
+		}
+	}
+	if strings.HasPrefix(strings.ToLower(user.LanguageCode), "zh") {
+		return "zh"
+	}
+	return "en"
+}
+
+// detectLanguageStatic detects language from Telegram User without DB lookup (for package-level use).
+func detectLanguageStatic(user *tgbotapi.User) string {
 	if user == nil {
 		return "en"
 	}
@@ -973,6 +1024,7 @@ func (b *Bot) handleHelpBack(query *tgbotapi.CallbackQuery, lang string) {
 				b.encodeCallback("help_cat", "other"),
 			),
 		),
+		b.mainMenuBackRow(lang),
 	)
 
 	b.editMessageWithKeyboard(msg.Chat.ID, msg.MessageID, b.getText("help_title", lang), keyboard)
@@ -1009,7 +1061,7 @@ func (b *Bot) handleMainMenu(query *tgbotapi.CallbackQuery, lang string, action 
 		}
 		b.handleList(fakeMsg, lang)
 	case "blocks":
-		// Send block management menu with 3 category buttons
+		// Send block management menu with 3 category buttons + back
 		keyboard := tgbotapi.NewInlineKeyboardMarkup(
 			tgbotapi.NewInlineKeyboardRow(
 				tgbotapi.NewInlineKeyboardButtonData(
@@ -1029,6 +1081,7 @@ func (b *Bot) handleMainMenu(query *tgbotapi.CallbackQuery, lang string, action 
 					b.encodeCallback("block_cat", "receiver"),
 				),
 			),
+			b.mainMenuBackRow(lang),
 		)
 		b.sendHTMLWithKeyboard(chatID, b.getText("btn_block_mgmt", lang), keyboard)
 	case "help":
@@ -1038,6 +1091,15 @@ func (b *Bot) handleMainMenu(query *tgbotapi.CallbackQuery, lang string, action 
 			From: query.From,
 		}
 		b.handleHelp(fakeMsg, lang)
+	case "lang":
+		keyboard := tgbotapi.NewInlineKeyboardMarkup(
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("English", b.encodeCallback("set_lang", "en")),
+				tgbotapi.NewInlineKeyboardButtonData("中文", b.encodeCallback("set_lang", "zh")),
+			),
+			b.mainMenuBackRow(lang),
+		)
+		b.sendHTMLWithKeyboard(chatID, b.getText("msg_lang_select", lang), keyboard)
 	}
 
 	b.answerCallbackQuery(query.ID, "", false)
@@ -1161,4 +1223,70 @@ func (b *Bot) handleBlockCategory(query *tgbotapi.CallbackQuery, lang string, ca
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(rows...)
 	b.editMessageWithKeyboard(chatID, msg.MessageID, text, keyboard)
 	b.answerCallbackQuery(query.ID, "", false)
+}
+
+// handleLang sends a language selection menu.
+func (b *Bot) handleLang(msg *tgbotapi.Message) {
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("English", b.encodeCallback("set_lang", "en")),
+			tgbotapi.NewInlineKeyboardButtonData("中文", b.encodeCallback("set_lang", "zh")),
+		),
+	)
+	b.sendHTMLWithKeyboard(msg.Chat.ID, "Choose your language / 选择语言：", keyboard)
+}
+
+// handleSetLang saves the user's language preference and confirms.
+func (b *Bot) handleSetLang(query *tgbotapi.CallbackQuery, lang string) {
+	if lang != "zh" && lang != "en" {
+		lang = "en"
+	}
+	if err := b.io.SetUserLang(query.From.ID, lang); err != nil {
+		log.Printf("failed to set user lang: %v", err)
+	}
+	b.editMessageNoKeyboard(query.Message.Chat.ID, query.Message.MessageID, b.getText("msg_lang_set", lang))
+	b.answerCallbackQuery(query.ID, "", false)
+}
+
+// handleGoMain sends the main menu (same as /start for existing users).
+func (b *Bot) handleGoMain(query *tgbotapi.CallbackQuery, lang string) {
+	chatID := query.Message.Chat.ID
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(
+				b.getText("btn_my_domains", lang),
+				b.encodeCallback("main_menu", "domains"),
+			),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(
+				b.getText("btn_block_mgmt", lang),
+				b.encodeCallback("main_menu", "blocks"),
+			),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(
+				b.getText("btn_help", lang),
+				b.encodeCallback("main_menu", "help"),
+			),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(
+				b.getText("btn_lang", lang),
+				b.encodeCallback("main_menu", "lang"),
+			),
+		),
+	)
+	b.editMessageWithKeyboard(chatID, query.Message.MessageID, b.getText("welcome_back", lang), keyboard)
+	b.answerCallbackQuery(query.ID, "", false)
+}
+
+// mainMenuBackRow returns a keyboard row with a "Main Menu" button.
+func (b *Bot) mainMenuBackRow(lang string) []tgbotapi.InlineKeyboardButton {
+	return tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData(
+			b.getText("btn_main_menu", lang),
+			b.encodeCallback("go_main"),
+		),
+	)
 }
