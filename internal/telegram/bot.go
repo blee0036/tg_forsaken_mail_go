@@ -904,6 +904,18 @@ func (b *Bot) editMessageWithKeyboard(chatID int64, messageID int, text string, 
 	}
 }
 
+// editMessageNoKeyboard edits a message's text and removes the inline keyboard.
+func (b *Bot) editMessageNoKeyboard(chatID int64, messageID int, text string) {
+	if b.sender == nil {
+		return
+	}
+	editMsg := tgbotapi.NewEditMessageText(chatID, messageID, text)
+	editMsg.ParseMode = "HTML"
+	if _, err := b.sender.Send(editMsg); err != nil {
+		log.Printf("failed to edit message: %v", err)
+	}
+}
+
 // answerCallbackQuery sends an answer to a callback query, optionally showing an alert popup.
 func (b *Bot) answerCallbackQuery(queryID string, text string, showAlert bool) {
 	if b.sender == nil {
@@ -1064,8 +1076,7 @@ func (b *Bot) handleDismissConfirm(query *tgbotapi.CallbackQuery, lang string, d
 
 	// Edit message to show success (remove keyboard)
 	successText := b.getText("msg_dismiss_success", lang)
-	emptyKeyboard := tgbotapi.NewInlineKeyboardMarkup()
-	b.editMessageWithKeyboard(chatID, msg.MessageID, successText, emptyKeyboard)
+	b.editMessageNoKeyboard(chatID, msg.MessageID, successText)
 	b.answerCallbackQuery(query.ID, "", false)
 }
 
@@ -1074,8 +1085,7 @@ func (b *Bot) handleDismissCancel(query *tgbotapi.CallbackQuery, lang string) {
 	msg := query.Message
 
 	cancelText := b.getText("msg_dismiss_cancel", lang)
-	emptyKeyboard := tgbotapi.NewInlineKeyboardMarkup()
-	b.editMessageWithKeyboard(msg.Chat.ID, msg.MessageID, cancelText, emptyKeyboard)
+	b.editMessageNoKeyboard(msg.Chat.ID, msg.MessageID, cancelText)
 	b.answerCallbackQuery(query.ID, "", false)
 }
 
@@ -1131,8 +1141,7 @@ func (b *Bot) handleBlockCategory(query *tgbotapi.CallbackQuery, lang string, ca
 	}
 
 	if len(items) == 0 {
-		emptyKeyboard := tgbotapi.NewInlineKeyboardMarkup()
-		b.editMessageWithKeyboard(chatID, msg.MessageID, b.getText("msg_no_blocks", lang), emptyKeyboard)
+		b.editMessageNoKeyboard(chatID, msg.MessageID, b.getText("msg_no_blocks", lang))
 		b.answerCallbackQuery(query.ID, "", false)
 		return
 	}
