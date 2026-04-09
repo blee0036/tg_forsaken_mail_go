@@ -68,6 +68,7 @@ cp config-simple.json config.json
 ```bash
 docker run -d \
   --name tg-mail-bot \
+  --restart always \
   -p 25:25 \
   -v $(pwd)/config.json:/app/config.json \
   -v $(pwd)/mail.db:/app/mail.db \
@@ -80,6 +81,7 @@ docker run -d \
 cd go_version
 docker build -t tg-mail-bot .
 docker run -d \
+  --restart always \
   -p 25:25 \
   -v $(pwd)/config.json:/app/config.json \
   -v $(pwd)/mail.db:/app/mail.db \
@@ -103,8 +105,8 @@ Description=TG-Forsaken-Mail (Go)
 After=network.target
 
 [Service]
-WorkingDirectory=/opt/tg_forsaken_mail/go_version
-ExecStart=/opt/tg_forsaken_mail/go_version/bot
+WorkingDirectory=/path/to/tg_forsaken_mail/go_version
+ExecStart=/path/to/tg_forsaken_mail/go_version/bot
 Restart=on-abnormal
 RestartSec=5s
 
