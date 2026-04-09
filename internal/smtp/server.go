@@ -6,9 +6,80 @@ import (
 	"log"
 	"strings"
 
-	"github.com/emersion/go-message/mail"
+	"github.com/emersion/go-message"
+	gomail "github.com/emersion/go-message/mail"
 	gosmtp "github.com/emersion/go-smtp"
+	"golang.org/x/text/encoding"
+	"golang.org/x/text/encoding/charmap"
+	"golang.org/x/text/encoding/japanese"
+	"golang.org/x/text/encoding/korean"
+	"golang.org/x/text/encoding/simplifiedchinese"
+	"golang.org/x/text/encoding/traditionalchinese"
+	"golang.org/x/text/encoding/unicode"
 )
+
+// charsetMap maps lowercase charset names to their encoding.
+var charsetMap = map[string]encoding.Encoding{
+	"gb2312":      simplifiedchinese.GBK, // GBK is a superset of GB2312
+	"gbk":         simplifiedchinese.GBK,
+	"gb18030":     simplifiedchinese.GB18030,
+	"hz-gb-2312":  simplifiedchinese.HZGB2312,
+	"big5":        traditionalchinese.Big5,
+	"euc-kr":      korean.EUCKR,
+	"euc-jp":      japanese.EUCJP,
+	"iso-2022-jp": japanese.ISO2022JP,
+	"shift_jis":   japanese.ShiftJIS,
+	"windows-874": charmap.Windows874,
+	"koi8-r":      charmap.KOI8R,
+	"koi8-u":      charmap.KOI8U,
+	"utf-16be":    unicode.UTF16(unicode.BigEndian, unicode.IgnoreBOM),
+	"utf-16le":    unicode.UTF16(unicode.LittleEndian, unicode.IgnoreBOM),
+}
+
+func init() {
+	// Also add windows-125x and iso-8859-x from charmap
+	for i := 0; i <= 8; i++ {
+		name := fmt.Sprintf("windows-125%d", i)
+		switch i {
+		case 0:
+			charsetMap[name] = charmap.Windows1250
+		case 1:
+			charsetMap[name] = charmap.Windows1251
+		case 2:
+			charsetMap[name] = charmap.Windows1252
+		case 3:
+			charsetMap[name] = charmap.Windows1253
+		case 4:
+			charsetMap[name] = charmap.Windows1254
+		case 5:
+			charsetMap[name] = charmap.Windows1255
+		case 6:
+			charsetMap[name] = charmap.Windows1256
+		case 7:
+			charsetMap[name] = charmap.Windows1257
+		case 8:
+			charsetMap[name] = charmap.Windows1258
+		}
+	}
+
+	// Register charset decoder for go-message
+	message.CharsetReader = func(charset string, input io.Reader) (io.Reader, error) {
+		cs := strings.ToLower(strings.TrimSpace(charset))
+
+		// UTF-8 needs no transform
+		if cs == "utf-8" || cs == "us-ascii" || cs == "ascii" || cs == "" {
+			return input, nil
+		}
+
+		if enc, ok := charsetMap[cs]; ok {
+			return enc.NewDecoder().Reader(input), nil
+		}
+
+		// Fallback: return input as-is with a warning rather than failing
+		log.Printf("warning: unsupported charset %q, reading as raw bytes", charset)
+		return input, nil
+	}
+}
 
 // Attachment represents an email attachment.
 type Attachment struct {
@@ -67,7 +138,7 @@ func (s *Server) Start() error {
 // ParseMail parses a MIME message from a reader and returns a ParsedMail struct.
 // This function can be used independently for testing.
 func ParseMail(r io.Reader) (*ParsedMail, error) {
-	mr, err := mail.CreateReader(r)
+	mr, err := gomail.CreateReader(r)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create mail reader: %w", err)
 	}
@@ -112,11 +183,11 @@ func ParseMail(r io.Reader) (*ParsedMail, error) {
 		}
 		if err != nil {
 			log.Printf("error reading mail part: %v", err)
-			break
+			continue
 		}
 
 		switch h := part.Header.(type) {
-		case *mail.InlineHeader:
+		case *gomail.InlineHeader:
 			contentType := h.Get("Content-Type")
 			body, err := io.ReadAll(part.Body)
 			if err != nil {
@@ -129,7 +200,7 @@ func ParseMail(r io.Reader) (*ParsedMail, error) {
 				// text/plain or default
 				parsed.Text = string(body)
 			}
-		case *mail.AttachmentHeader:
+		case *gomail.AttachmentHeader:
 			filename, _ := h.Filename()
 			contentType := h.Get("Content-Type")
 			body, err := io.ReadAll(part.Body)
