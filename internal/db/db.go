@@ -122,6 +122,18 @@ func (d *DB) initTables() error {
 		}
 	}
 
+	// Check and create user_settings (for language preference)
+	if !d.tableExists("user_settings") {
+		_, err := d.db.Exec(`
+        CREATE TABLE user_settings (
+            tg INTEGER PRIMARY KEY,
+            lang TEXT DEFAULT ''
+        );`)
+		if err != nil {
+			return fmt.Errorf("create user_settings: %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -437,4 +449,23 @@ func (d *DB) SelectUserAllBlockReceiver(tg int64) ([]BlockReceiver, error) {
 		results = append(results, r)
 	}
 	return results, rows.Err()
+}
+
+// --- User settings operations (user_settings table) ---
+
+// GetUserLang returns the stored language preference for a user.
+// Returns empty string if not set.
+func (d *DB) GetUserLang(tg int64) string {
+	var lang string
+	err := d.db.QueryRow(`SELECT lang FROM user_settings WHERE tg = ?`, tg).Scan(&lang)
+	if err != nil {
+		return ""
+	}
+	return lang
+}
+
+// SetUserLang stores the language preference for a user (upsert).
+func (d *DB) SetUserLang(tg int64, lang string) error {
+	_, err := d.db.Exec(`INSERT INTO user_settings (tg, lang) VALUES (?, ?) ON CONFLICT(tg) DO UPDATE SET lang = ?`, tg, lang, lang)
+	return err
 }
