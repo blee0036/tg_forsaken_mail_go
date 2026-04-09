@@ -204,7 +204,12 @@ func (o *IO) HandleMail(mail *smtpmod.ParsedMail) {
 		msg.ParseMode = "HTML"
 		msg.ReplyMarkup = keyboard
 		if _, err := o.bot.Send(msg); err != nil {
-			log.Printf("failed to send mail message: %v", err)
+			log.Printf("failed to send mail message with HTML mode: %v\nMessage content:\n%s", err, email)
+			// Retry without HTML parse mode as fallback
+			msg.ParseMode = ""
+			if _, err := o.bot.Send(msg); err != nil {
+				log.Printf("failed to send mail message (fallback): %v", err)
+			}
 		}
 
 		// Send attachments
