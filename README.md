@@ -1,152 +1,105 @@
-# TG-Forsaken-Mail (Go Version)
+TG-Forsaken-Mail
+==============
+A self-hosted forward mail to your telegram account via telegram bot.
 
-A self-hosted email-to-Telegram forwarding service written in Go. Receives emails via SMTP and forwards them to your Telegram account through a bot.
+Edit and Fork From [forsaken-mail](https://github.com/denghongcai/forsaken-mail)
 
-Rewritten from the original Node.js version with improved performance, type safety, and property-based testing.
+### Installation
 
-## Features
+#### Set Up DNS Record
 
-- Receive emails at `*@yourdomain.com` and forward to Telegram
-- Bind multiple domains to your Telegram account
-- Block senders, sender domains, or receivers
-- Optional HTML email upload (for rich content)
-- Admin broadcast to all users
+First, you need a domain for receive all mail which send to you `*@<example.com>` mail address. Setup a dns record on
+you name server.
 
-## Requirements
+| Record Type | Name | IP Address            | If have any cdn proxy |
+|-------------|------|-----------------------|-----------------------|
+| A           | @    | <Your server IP addr> | DISABLE               |
 
-- Go 1.21+
-- A domain with MX record pointing to your server
-- Port 25 open (SMTP)
-- A Telegram Bot token (from [@BotFather](https://t.me/BotFather))
+#### Clone Project
 
-## Configuration
+```git clone https://github.com/blee0036/tg_forsaken_mail.git ```
 
-Copy the example config and fill in your values:
+#### Install NVM NodeJS
 
-```bash
+```
+# Install NVM
+touch ~/.profile
+curl -sL https://raw.githubusercontent.com/nvm-sh/nvm/v0.37.2/install.sh -o install_nvm.sh && bash install_nvm.sh
+source ~/.profile
+# Install NJS
+nvm install 15.10.0 && nvm use 15.10.0
+
+# Check NodeJS version
+# OutPut : v15.10.0
+node -v 
+
+# Install Package
+cd tg_forsaken_mail && npm install
+```
+
+#### Edit Config
+
+```
 cp config-simple.json config.json
+vim config.json
 ```
 
-```json
-{
-  "mailin": {
-    "host": "0.0.0.0",
-    "port": 25
-  },
-  "mail_domain": "yourdomain.com",
-  "telegram_bot_token": "your-bot-token",
-  "admin_tg_id": "your-telegram-id",
-  "upload_url": "",
-  "upload_token": ""
-}
+<b>Only edit</b> <code>mail_domain</code> to your and <code>telegram_bot_token</code>
+
+#### Set Systemd
+
+```
+# mkdir
+mkdir -p /usr/lib/systemd/system
+# edit service
+vim /usr/lib/systemd/system/tgbot.service
 ```
 
-| Field | Description |
-|-------|-------------|
-| `mail_domain` | The domain used for MX record (e.g. `mail.yourdomain.com`) |
-| `telegram_bot_token` | Bot token from @BotFather |
-| `admin_tg_id` | Your Telegram user ID — enables `/send_all` broadcast |
-| `upload_url` | Optional: URL to upload HTML email content |
-| `upload_token` | Optional: Auth token for the upload endpoint |
+Edit <code>TG_MAIL_BOT_PATH</code> as your tg-forsaken-mail path
 
-## DNS Setup
-
-Add an MX record pointing to your server's IP:
-
-| Type | Name | Value | TTL |
-|------|------|-------|-----|
-| A | `mail` | `<your server IP>` | 300 |
-| MX | `@` | `mail.yourdomain.com` | 300 |
-
-> Make sure port 25 is open and not blocked by your hosting provider.
-
-## Running
-
-### Binary
-
-```bash
-cd go_version
-go build -o bot ./cmd/bot
-./bot
 ```
-
-### Docker
-
-```bash
-cd go_version
-docker build -t tg-mail-bot .
-docker run -d \
-  -p 25:25 \
-  -v $(pwd)/config.json:/app/config.json \
-  -v $(pwd)/mail.db:/app/mail.db \
-  tg-mail-bot
-```
-
-### systemd
-
-```ini
 [Unit]
-Description=TG-Forsaken-Mail (Go)
+Description=TG-Forsaken-Mail
 After=network.target
+Wants=network.target
 
 [Service]
-WorkingDirectory=/path/to/go_version
-ExecStart=/path/to/go_version/bot
+WorkingDirectory=/TG_MAIL_BOT_PATH
+ExecStart=/root/.nvm/versions/node/v15.10.0/bin/node /TG_MAIL_BOT_PATH/bin/bot
 Restart=on-abnormal
 RestartSec=5s
+KillMode=mixed
+
+StandardOutput=null
+StandardError=syslog
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-```bash
+#### Start Bot
+
+```
+# reload system daemon
 systemctl daemon-reload
-systemctl enable --now tg-mail-bot
+
+# start bot
+systemctl start tgbot
+
+# auto start bot when system startup
+systemctl enable tgbot
 ```
 
-## Bot Commands
+### FAQ
 
-| Command | Description |
-|---------|-------------|
-| `/start` | Start the bot and bind a default domain |
-| `/help` | Show help |
-| `/list` | List your bound domains |
-| `/bind <domain>` | Bind a domain |
-| `/dismiss <domain>` | Unbind a domain |
-| `/unblock_domain <domain>` | Unblock a sender domain |
-| `/unblock_sender <email>` | Unblock a sender |
-| `/unblock_receiver <email>` | Unblock a receiver |
-| `/list_block_domain` | List blocked sender domains |
-| `/list_block_sender` | List blocked senders |
-| `/list_block_receiver` | List blocked receivers |
+Q: Why I can not get any mail with my telegram bot
 
-## Development
+A:
 
-```bash
-cd go_version
+1. send command `/start` to your bot. Check if `telegram_bot_token` has settled correctly.
 
-# Run all tests
-go test ./...
+If bot can not reply, please search on google "how to setup a telegram bot" and get correct bot token.
 
-# Run with verbose output
-go test -v ./...
-```
-
-The project uses [gopter](https://github.com/leanovate/gopter) for property-based testing alongside standard unit tests.
-
-## Project Structure
-
-```
-go_version/
-├── cmd/bot/          # Entry point
-├── internal/
-│   ├── config/       # Config loading
-│   ├── db/           # SQLite database layer
-│   ├── io/           # Business logic (mail handling, domain/block management)
-│   ├── smtp/         # SMTP server
-│   ├── telegram/     # Telegram bot
-│   ├── upload/       # HTML upload client
-│   └── lrucache/     # LRU cache
-├── config-simple.json
-└── Dockerfile
-```
+2. if bot reply correctly, you can use `tcping` command to check if port of smtp protocol `25` is open. If is not
+   responsed, check your server firewall and open the port. Some server seller also block port 25 for prevent them from
+   email abuse. Just change another server seller.
