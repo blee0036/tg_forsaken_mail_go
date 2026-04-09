@@ -72,6 +72,7 @@ docker run -d \
   -p 25:25 \
   -v $(pwd)/config.json:/app/config.json \
   -v $(pwd)/mail.db:/app/mail.db \
+  -v /etc/localtime:/etc/localtime:ro \
   ghcr.io/blee0036/tg_forsaken_main_go:latest
 ```
 
@@ -85,6 +86,7 @@ docker run -d \
   -p 25:25 \
   -v $(pwd)/config.json:/app/config.json \
   -v $(pwd)/mail.db:/app/mail.db \
+  -v /etc/localtime:/etc/localtime:ro \
   tg-mail-bot
 ```
 
