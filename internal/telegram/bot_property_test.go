@@ -247,7 +247,7 @@ func TestProperty_DetectLanguageDeterminism(t *testing.T) {
 	properties.Property("zh-prefixed LanguageCode returns zh", prop.ForAll(
 		func(langCode string) bool {
 			user := &tgbotapi.User{LanguageCode: langCode}
-			result := detectLanguage(user)
+			result := detectLanguageStatic(user)
 			if result != "zh" {
 				t.Logf("expected zh for LanguageCode=%q, got %q", langCode, result)
 			}
@@ -259,7 +259,7 @@ func TestProperty_DetectLanguageDeterminism(t *testing.T) {
 	properties.Property("non-zh LanguageCode returns en", prop.ForAll(
 		func(langCode string) bool {
 			user := &tgbotapi.User{LanguageCode: langCode}
-			result := detectLanguage(user)
+			result := detectLanguageStatic(user)
 			if result != "en" {
 				t.Logf("expected en for LanguageCode=%q, got %q", langCode, result)
 			}
@@ -270,7 +270,7 @@ func TestProperty_DetectLanguageDeterminism(t *testing.T) {
 
 	properties.Property("nil user returns en", prop.ForAll(
 		func(_ int) bool {
-			result := detectLanguage(nil)
+			result := detectLanguageStatic(nil)
 			return result == "en"
 		},
 		gen.Const(0),
@@ -279,8 +279,8 @@ func TestProperty_DetectLanguageDeterminism(t *testing.T) {
 	properties.Property("detectLanguage is deterministic for any string", prop.ForAll(
 		func(langCode string) bool {
 			user := &tgbotapi.User{LanguageCode: langCode}
-			r1 := detectLanguage(user)
-			r2 := detectLanguage(user)
+			r1 := detectLanguageStatic(user)
+			r2 := detectLanguageStatic(user)
 			// Verify determinism
 			if r1 != r2 {
 				return false
