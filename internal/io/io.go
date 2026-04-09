@@ -2,6 +2,7 @@ package io
 
 import (
 	"fmt"
+	"html"
 	"log"
 	"regexp"
 	"strings"
@@ -82,12 +83,12 @@ func (o *IO) SetBot(bot *tgbotapi.BotAPI) {
 // If the total message (headers + body) exceeds 4000 characters, truncates to headers only.
 // The lang parameter is reserved for future use (button labels are handled in HandleMail).
 func (o *IO) FormatMailNotification(mail *smtpmod.ParsedMail, lang string) string {
-	headers := "<b>From:</b> " + mail.From + "\n" +
-		"<b>To:</b> " + mail.To + "\n" +
-		"<b>Subject:</b> " + mail.Subject + "\n" +
-		"<b>Time:</b> " + mail.Date
+	headers := "<b>From:</b> " + html.EscapeString(mail.From) + "\n" +
+		"<b>To:</b> " + html.EscapeString(mail.To) + "\n" +
+		"<b>Subject:</b> " + html.EscapeString(mail.Subject) + "\n" +
+		"<b>Time:</b> " + html.EscapeString(mail.Date)
 
-	full := headers + "\n\n" + mail.Text
+	full := headers + "\n\n" + html.EscapeString(mail.Text)
 
 	if len(full) > 4000 {
 		return headers
@@ -203,7 +204,12 @@ func (o *IO) HandleMail(mail *smtpmod.ParsedMail) {
 		msg.ParseMode = "HTML"
 		msg.ReplyMarkup = keyboard
 		if _, err := o.bot.Send(msg); err != nil {
-			log.Printf("failed to send mail message: %v", err)
+			log.Printf("failed to send mail message with HTML mode: %v\nMessage content:\n%s", err, email)
+			// Retry without HTML parse mode as fallback
+			msg.ParseMode = ""
+			if _, err := o.bot.Send(msg); err != nil {
+				log.Printf("failed to send mail message (fallback): %v", err)
+			}
 		}
 
 		// Send attachments
