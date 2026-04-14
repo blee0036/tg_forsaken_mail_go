@@ -4,82 +4,14 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"strings"
 
-	"github.com/emersion/go-message"
+	_ "github.com/emersion/go-message/charset" // Register extended charset decoders (gb2312, gbk, big5, etc.)
 	gomail "github.com/emersion/go-message/mail"
 	gosmtp "github.com/emersion/go-smtp"
-	"golang.org/x/text/encoding"
-	"golang.org/x/text/encoding/charmap"
-	"golang.org/x/text/encoding/japanese"
-	"golang.org/x/text/encoding/korean"
-	"golang.org/x/text/encoding/simplifiedchinese"
-	"golang.org/x/text/encoding/traditionalchinese"
-	"golang.org/x/text/encoding/unicode"
+	"golang.org/x/text/encoding/ianaindex"
 )
-
-// charsetMap maps lowercase charset names to their encoding.
-var charsetMap = map[string]encoding.Encoding{
-	"gb2312":      simplifiedchinese.GBK, // GBK is a superset of GB2312
-	"gbk":         simplifiedchinese.GBK,
-	"gb18030":     simplifiedchinese.GB18030,
-	"hz-gb-2312":  simplifiedchinese.HZGB2312,
-	"big5":        traditionalchinese.Big5,
-	"euc-kr":      korean.EUCKR,
-	"euc-jp":      japanese.EUCJP,
-	"iso-2022-jp": japanese.ISO2022JP,
-	"shift_jis":   japanese.ShiftJIS,
-	"windows-874": charmap.Windows874,
-	"koi8-r":      charmap.KOI8R,
-	"koi8-u":      charmap.KOI8U,
-	"utf-16be":    unicode.UTF16(unicode.BigEndian, unicode.IgnoreBOM),
-	"utf-16le":    unicode.UTF16(unicode.LittleEndian, unicode.IgnoreBOM),
-}
-
-func init() {
-	// Also add windows-125x and iso-8859-x from charmap
-	for i := 0; i <= 8; i++ {
-		name := fmt.Sprintf("windows-125%d", i)
-		switch i {
-		case 0:
-			charsetMap[name] = charmap.Windows1250
-		case 1:
-			charsetMap[name] = charmap.Windows1251
-		case 2:
-			charsetMap[name] = charmap.Windows1252
-		case 3:
-			charsetMap[name] = charmap.Windows1253
-		case 4:
-			charsetMap[name] = charmap.Windows1254
-		case 5:
-			charsetMap[name] = charmap.Windows1255
-		case 6:
-			charsetMap[name] = charmap.Windows1256
-		case 7:
-			charsetMap[name] = charmap.Windows1257
-		case 8:
-			charsetMap[name] = charmap.Windows1258
-		}
-	}
-
-	// Register charset decoder for go-message
-	message.CharsetReader = func(charset string, input io.Reader) (io.Reader, error) {
-		cs := strings.ToLower(strings.TrimSpace(charset))
-
-		// UTF-8 needs no transform
-		if cs == "utf-8" || cs == "us-ascii" || cs == "ascii" || cs == "" {
-			return input, nil
-		}
-
-		if enc, ok := charsetMap[cs]; ok {
-			return enc.NewDecoder().Reader(input), nil
-		}
-
-		// Fallback: return input as-is with a warning rather than failing
-		log.Printf("warning: unsupported charset %q, reading as raw bytes", charset)
-		return input, nil
-	}
-}
 
 // Attachment represents an email attachment.
 type Attachment struct {
@@ -135,6 +67,33 @@ func (s *Server) Start() error {
 	return srv.ListenAndServe()
 }
 
+// decodeRFC2047 decodes RFC 2047 encoded-words (e.g. =?utf-8?q?...?=) in a header value.
+// Returns the original string if decoding fails.
+var mimeDecoder = &mime.WordDecoder{
+	CharsetReader: func(charset string, input io.Reader) (io.Reader, error) {
+		// Reuse go-message's registered charset decoders
+		// The _ import of go-message/charset registers them globally,
+		// but mime.WordDecoder needs its own CharsetReader.
+		// We delegate to golang.org/x/text via ianaindex.
+		enc, err := ianaindex.MIME.Encoding(charset)
+		if err != nil {
+			return input, nil // fallback: return raw bytes
+		}
+		if enc == nil {
+			return input, nil // UTF-8, no transform needed
+		}
+		return enc.NewDecoder().Reader(input), nil
+	},
+}
+
+func decodeRFC2047(s string) string {
+	decoded, err := mimeDecoder.DecodeHeader(s)
+	if err != nil {
+		return s
+	}
+	return decoded
+}
+
 // ParseMail parses a MIME message from a reader and returns a ParsedMail struct.
 // This function can be used independently for testing.
 func ParseMail(r io.Reader) (*ParsedMail, error) {
@@ -152,19 +111,19 @@ func ParseMail(r io.Reader) (*ParsedMail, error) {
 	if fromList, err := header.AddressList("From"); err == nil && len(fromList) > 0 {
 		parsed.From = fromList[0].String()
 	} else {
-		parsed.From = header.Get("From")
+		parsed.From = decodeRFC2047(header.Get("From"))
 	}
 
 	if toList, err := header.AddressList("To"); err == nil && len(toList) > 0 {
 		parsed.To = toList[0].String()
 	} else {
-		parsed.To = header.Get("To")
+		parsed.To = decodeRFC2047(header.Get("To"))
 	}
 
 	if subject, err := header.Subject(); err == nil {
 		parsed.Subject = subject
 	} else {
-		parsed.Subject = header.Get("Subject")
+		parsed.Subject = decodeRFC2047(header.Get("Subject"))
 	}
 
 	if date, err := header.Date(); err == nil {
