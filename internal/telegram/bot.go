@@ -277,6 +277,14 @@ var defaultTexts = map[string]LangTexts{
 		EN: "✅ Language set to English.",
 		ZH: "✅ 语言已设置为中文。",
 	},
+	"btn_prev": {
+		EN: "⬅️ Prev",
+		ZH: "⬅️ 上一页",
+	},
+	"btn_next": {
+		EN: "➡️ Next",
+		ZH: "➡️ 下一页",
+	},
 }
 
 // GenerateHelpMessages generates the English and Chinese help messages with the given mail domain.
@@ -538,6 +546,24 @@ func (b *Bot) handleCallbackQuery(callbackQuery *tgbotapi.CallbackQuery) {
 		b.handleSetLang(callbackQuery, param)
 	case "go_main":
 		b.handleGoMain(callbackQuery, lang)
+	case "list_page":
+		page := 0
+		if len(cb.Params) > 0 {
+			fmt.Sscanf(cb.Params[0], "%d", &page)
+		}
+		b.handleListPage(callbackQuery, lang, page)
+	case "block_page":
+		cat := ""
+		page := 0
+		if len(cb.Params) > 0 {
+			cat = cb.Params[0]
+		}
+		if len(cb.Params) > 1 {
+			fmt.Sscanf(cb.Params[1], "%d", &page)
+		}
+		b.handleBlockCategoryPage(callbackQuery, lang, cat, page)
+	case "noop":
+		b.answerCallbackQuery(callbackQuery.ID, "", false)
 	default:
 		b.answerCallbackQuery(callbackQuery.ID, b.getText("err_unknown_cmd", lang), true)
 	}
@@ -692,9 +718,11 @@ func (b *Bot) handleHelp(msg *tgbotapi.Message, lang string) {
 	b.sendHTMLWithKeyboard(msg.Chat.ID, b.getText("help_title", lang), keyboard)
 }
 
+// pageSize is the number of items per page in list views.
+const pageSize = 5
+
 // handleList handles the /list command.
-// Lists all domains bound to the user with an "Unbind" button for each.
-// If no domains, sends a message saying no domains bound.
+// Lists all domains bound to the user with an "Unbind" button for each, paginated.
 func (b *Bot) handleList(msg *tgbotapi.Message, lang string) {
 	domains := b.io.GetUserDomains(msg.Chat.ID)
 
@@ -703,20 +731,59 @@ func (b *Bot) handleList(msg *tgbotapi.Message, lang string) {
 		return
 	}
 
+	text, rows := b.buildDomainPage(domains, 0, lang)
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(rows...)
+	b.sendHTMLWithKeyboard(msg.Chat.ID, text, keyboard)
+}
+
+// buildDomainPage builds the text and keyboard rows for a page of domains.
+func (b *Bot) buildDomainPage(domains []string, page int, lang string) (string, [][]tgbotapi.InlineKeyboardButton) {
+	total := len(domains)
+	start := page * pageSize
+	if start >= total {
+		start = 0
+		page = 0
+	}
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+
 	text := b.getText("msg_list_title", lang) + "\n\n"
 	var rows [][]tgbotapi.InlineKeyboardButton
-	for i, domain := range domains {
-		text += fmt.Sprintf("%d. <code>%s</code>\n", i+1, domain)
+	for i := start; i < end; i++ {
+		text += fmt.Sprintf("%d. <code>%s</code>\n", i+1, domains[i])
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData(
-				b.getText("btn_dismiss", lang)+" "+domain,
-				b.encodeCallback("dismiss_ask", domain),
+				b.getText("btn_dismiss", lang)+" "+domains[i],
+				b.encodeCallback("dismiss_ask", domains[i]),
 			),
 		))
 	}
 
-	keyboard := tgbotapi.NewInlineKeyboardMarkup(rows...)
-	b.sendHTMLWithKeyboard(msg.Chat.ID, text, keyboard)
+	// Pagination row
+	totalPages := (total + pageSize - 1) / pageSize
+	if totalPages > 1 {
+		var navBtns []tgbotapi.InlineKeyboardButton
+		if page > 0 {
+			navBtns = append(navBtns, tgbotapi.NewInlineKeyboardButtonData(
+				b.getText("btn_prev", lang), b.encodeCallback("list_page", fmt.Sprintf("%d", page-1)),
+			))
+		}
+		navBtns = append(navBtns, tgbotapi.NewInlineKeyboardButtonData(
+			fmt.Sprintf("%d/%d", page+1, totalPages), b.encodeCallback("noop"),
+		))
+		if page < totalPages-1 {
+			navBtns = append(navBtns, tgbotapi.NewInlineKeyboardButtonData(
+				b.getText("btn_next", lang), b.encodeCallback("list_page", fmt.Sprintf("%d", page+1)),
+			))
+		}
+		rows = append(rows, navBtns)
+	}
+
+	// Back to main menu
+	rows = append(rows, b.mainMenuBackRow(lang))
+	return text, rows
 }
 
 // handleBind handles the /bind command.
@@ -1187,8 +1254,13 @@ func (b *Bot) handleUnblockAction(query *tgbotapi.CallbackQuery, lang string, bl
 	b.handleBlockCategory(query, lang, blockType)
 }
 
-// handleBlockCategory edits the message to show all blocked items in a category with "Unblock" buttons.
+// handleBlockCategory edits the message to show all blocked items in a category with "Unblock" buttons, paginated.
 func (b *Bot) handleBlockCategory(query *tgbotapi.CallbackQuery, lang string, category string) {
+	b.handleBlockCategoryPage(query, lang, category, 0)
+}
+
+// handleBlockCategoryPage renders a specific page of blocked items.
+func (b *Bot) handleBlockCategoryPage(query *tgbotapi.CallbackQuery, lang string, category string, page int) {
 	msg := query.Message
 	chatID := msg.Chat.ID
 
@@ -1203,22 +1275,70 @@ func (b *Bot) handleBlockCategory(query *tgbotapi.CallbackQuery, lang string, ca
 	}
 
 	if len(items) == 0 {
-		b.editMessageNoKeyboard(chatID, msg.MessageID, b.getText("msg_no_blocks", lang))
+		// Empty list with back button to block management
+		keyboard := tgbotapi.NewInlineKeyboardMarkup(
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData(
+					b.getText("btn_back", lang),
+					b.encodeCallback("main_menu", "blocks"),
+				),
+			),
+		)
+		b.editMessageWithKeyboard(chatID, msg.MessageID, b.getText("msg_no_blocks", lang), keyboard)
 		b.answerCallbackQuery(query.ID, "", false)
 		return
 	}
 
+	total := len(items)
+	start := page * pageSize
+	if start >= total {
+		start = 0
+		page = 0
+	}
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+
 	text := ""
 	var rows [][]tgbotapi.InlineKeyboardButton
-	for i, item := range items {
-		text += fmt.Sprintf("%d. <code>%s</code>\n", i+1, item)
+	for i := start; i < end; i++ {
+		text += fmt.Sprintf("%d. <code>%s</code>\n", i+1, items[i])
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData(
-				b.getText("btn_unblock", lang)+" "+item,
-				b.encodeCallback("unblock_"+category, item),
+				b.getText("btn_unblock", lang)+" "+items[i],
+				b.encodeCallback("unblock_"+category, items[i]),
 			),
 		))
 	}
+
+	// Pagination row
+	totalPages := (total + pageSize - 1) / pageSize
+	if totalPages > 1 {
+		var navBtns []tgbotapi.InlineKeyboardButton
+		if page > 0 {
+			navBtns = append(navBtns, tgbotapi.NewInlineKeyboardButtonData(
+				b.getText("btn_prev", lang), b.encodeCallback("block_page", category, fmt.Sprintf("%d", page-1)),
+			))
+		}
+		navBtns = append(navBtns, tgbotapi.NewInlineKeyboardButtonData(
+			fmt.Sprintf("%d/%d", page+1, totalPages), b.encodeCallback("noop"),
+		))
+		if page < totalPages-1 {
+			navBtns = append(navBtns, tgbotapi.NewInlineKeyboardButtonData(
+				b.getText("btn_next", lang), b.encodeCallback("block_page", category, fmt.Sprintf("%d", page+1)),
+			))
+		}
+		rows = append(rows, navBtns)
+	}
+
+	// Back to block management
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData(
+			b.getText("btn_back", lang),
+			b.encodeCallback("main_menu", "blocks"),
+		),
+	))
 
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(rows...)
 	b.editMessageWithKeyboard(chatID, msg.MessageID, text, keyboard)
@@ -1289,4 +1409,21 @@ func (b *Bot) mainMenuBackRow(lang string) []tgbotapi.InlineKeyboardButton {
 			b.encodeCallback("go_main"),
 		),
 	)
+}
+
+// handleListPage handles pagination for the domain list via callback.
+func (b *Bot) handleListPage(query *tgbotapi.CallbackQuery, lang string, page int) {
+	chatID := query.Message.Chat.ID
+	domains := b.io.GetUserDomains(chatID)
+
+	if len(domains) == 0 {
+		b.editMessageNoKeyboard(chatID, query.Message.MessageID, b.getText("msg_no_domains", lang))
+		b.answerCallbackQuery(query.ID, "", false)
+		return
+	}
+
+	text, rows := b.buildDomainPage(domains, page, lang)
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(rows...)
+	b.editMessageWithKeyboard(chatID, query.Message.MessageID, text, keyboard)
+	b.answerCallbackQuery(query.ID, "", false)
 }
