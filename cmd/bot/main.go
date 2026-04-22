@@ -2,6 +2,8 @@ package main
 
 import (
 	"log"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 
 	"go-version-rewrite/internal/config"
@@ -69,7 +71,15 @@ func main() {
 	}()
 	log.Printf("SMTP server starting on %s:%d", cfg.Mailin.Host, cfg.Mailin.Port)
 
-	// 9. Start bot listening (blocking)
+	// 9. Start pprof server for debugging (localhost only)
+	go func() {
+		log.Println("pprof server listening on :6060")
+		if err := http.ListenAndServe("127.0.0.1:6060", nil); err != nil {
+			log.Printf("pprof server error: %v", err)
+		}
+	}()
+
+	// 10. Start bot listening (blocking)
 	log.Println("Bot is running, listening for Telegram messages...")
 	bot.Start()
 }
