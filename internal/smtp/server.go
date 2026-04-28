@@ -6,12 +6,30 @@ import (
 	"log"
 	"mime"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	_ "github.com/emersion/go-message/charset" // Register extended charset decoders (gb2312, gbk, big5, etc.)
 	gomail "github.com/emersion/go-message/mail"
 	gosmtp "github.com/emersion/go-smtp"
 	"golang.org/x/text/encoding/ianaindex"
 )
+
+// Rate-limited logging for mail parse errors to avoid high CPU from frequent log.Printf syscalls.
+var (
+	lastMailErrorLog atomic.Int64 // unix timestamp of last log
+)
+
+func logMailError(format string, args ...interface{}) {
+	now := time.Now().Unix()
+	last := lastMailErrorLog.Load()
+	if now-last < 5 { // at most once per 5 seconds
+		return
+	}
+	if lastMailErrorLog.CompareAndSwap(last, now) {
+		log.Printf(format, args...)
+	}
+}
 
 // Attachment represents an email attachment.
 type Attachment struct {
@@ -62,6 +80,8 @@ func (s *Server) Start() error {
 	srv.Addr = fmt.Sprintf("%s:%d", s.host, s.port)
 	srv.Domain = "localhost"
 	srv.AllowInsecureAuth = true
+	srv.ReadTimeout = 60 * time.Second
+	srv.WriteTimeout = 60 * time.Second
 
 	log.Printf("SMTP server listening on %s", srv.Addr)
 	return srv.ListenAndServe()
@@ -135,14 +155,16 @@ func ParseMail(r io.Reader) (*ParsedMail, error) {
 	}
 
 	// Parse body parts and attachments
-	for {
+	// Limit iterations to prevent infinite loops on malformed messages
+	const maxParts = 100
+	for i := 0; i < maxParts; i++ {
 		part, err := mr.NextPart()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			log.Printf("error reading mail part: %v", err)
-			continue
+			logMailError("error reading mail part: %v", err)
+			break
 		}
 
 		switch h := part.Header.(type) {
@@ -150,7 +172,7 @@ func ParseMail(r io.Reader) (*ParsedMail, error) {
 			contentType := h.Get("Content-Type")
 			body, err := io.ReadAll(part.Body)
 			if err != nil {
-				log.Printf("error reading inline part: %v", err)
+				logMailError("error reading inline part: %v", err)
 				continue
 			}
 			if strings.HasPrefix(contentType, "text/html") {
@@ -164,7 +186,7 @@ func ParseMail(r io.Reader) (*ParsedMail, error) {
 			contentType := h.Get("Content-Type")
 			body, err := io.ReadAll(part.Body)
 			if err != nil {
-				log.Printf("error reading attachment: %v", err)
+				logMailError("error reading attachment: %v", err)
 				continue
 			}
 			parsed.Attachments = append(parsed.Attachments, Attachment{
