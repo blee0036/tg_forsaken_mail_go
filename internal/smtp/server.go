@@ -106,6 +106,16 @@ var mimeDecoder = &mime.WordDecoder{
 	},
 }
 
+// formatAddress formats a mail.Address for display without re-encoding non-ASCII characters.
+// Unlike Address.String() which re-encodes the Name back to RFC 2047, this preserves
+// the decoded UTF-8 name as-is (e.g. "Microsoft 帳戶小組 <user@example.com>").
+func formatAddress(addr *gomail.Address) string {
+	if addr.Name != "" {
+		return addr.Name + " <" + addr.Address + ">"
+	}
+	return addr.Address
+}
+
 func decodeRFC2047(s string) string {
 	decoded, err := mimeDecoder.DecodeHeader(s)
 	if err != nil {
@@ -129,13 +139,13 @@ func ParseMail(r io.Reader) (*ParsedMail, error) {
 	header := mr.Header
 
 	if fromList, err := header.AddressList("From"); err == nil && len(fromList) > 0 {
-		parsed.From = fromList[0].String()
+		parsed.From = formatAddress(fromList[0])
 	} else {
 		parsed.From = decodeRFC2047(header.Get("From"))
 	}
 
 	if toList, err := header.AddressList("To"); err == nil && len(toList) > 0 {
-		parsed.To = toList[0].String()
+		parsed.To = formatAddress(toList[0])
 	} else {
 		parsed.To = decodeRFC2047(header.Get("To"))
 	}
