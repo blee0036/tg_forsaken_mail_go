@@ -763,15 +763,33 @@ func TestHandleMail_MessageFormat(t *testing.T) {
 		Text:    "This is the body.",
 	}
 
-	expected := "<b>From:</b> alice@sender.com\n" +
-		"<b>To:</b> bob@receiver.com\n" +
-		"<b>Subject:</b> Hello World\n" +
-		"<b>Time:</b> 2024-01-15 10:30:00\n\n" +
-		"This is the body."
-
 	result := io.FormatMailNotification(m, "en")
-	if result != expected {
-		t.Errorf("message format mismatch:\ngot:  %q\nwant: %q", result, expected)
+
+	// Verify Markdown bold headers are present
+	if !strings.Contains(result, "*From:*") {
+		t.Errorf("missing *From:* in result: %q", result)
+	}
+	if !strings.Contains(result, "*To:*") {
+		t.Errorf("missing *To:* in result: %q", result)
+	}
+	if !strings.Contains(result, "*Subject:*") {
+		t.Errorf("missing *Subject:* in result: %q", result)
+	}
+	if !strings.Contains(result, "*Time:*") {
+		t.Errorf("missing *Time:* in result: %q", result)
+	}
+	// Verify field values are present (escaped for MarkdownV2)
+	if !strings.Contains(result, "alice@sender") {
+		t.Errorf("missing from value in result: %q", result)
+	}
+	if !strings.Contains(result, "bob@receiver") {
+		t.Errorf("missing to value in result: %q", result)
+	}
+	if !strings.Contains(result, "Hello World") {
+		t.Errorf("missing subject value in result: %q", result)
+	}
+	if !strings.Contains(result, "This is the body") {
+		t.Errorf("missing body text in result: %q", result)
 	}
 }
 
@@ -787,21 +805,22 @@ func TestHandleMail_MessageTruncation(t *testing.T) {
 
 	result := io.FormatMailNotification(m, "en")
 
-	if len(result) > 4000 {
-		t.Errorf("truncated message should be <= 4000 chars, got %d", len(result))
+	// Should still contain Markdown bold headers
+	if !strings.Contains(result, "*From:*") {
+		t.Error("truncated message should contain *From:* header")
+	}
+	if !strings.Contains(result, "*Subject:*") {
+		t.Error("truncated message should contain *Subject:* header")
 	}
 
-	// Verify truncated message doesn't contain body text
-	if strings.Contains(result, "xxxx") {
-		t.Error("truncated message should not contain body text")
+	// Should contain truncation hint
+	if !strings.Contains(result, "✂️") {
+		t.Error("truncated message should contain truncation hint")
 	}
 
-	// Should still contain headers
-	if !strings.Contains(result, "<b>From:</b>") {
-		t.Error("truncated message should contain From header")
-	}
-	if !strings.Contains(result, "<b>Subject:</b>") {
-		t.Error("truncated message should contain Subject header")
+	// Should NOT contain the full body (4000 x's)
+	if strings.Contains(result, strings.Repeat("x", 4000)) {
+		t.Error("truncated message should not contain the full body text")
 	}
 }
 

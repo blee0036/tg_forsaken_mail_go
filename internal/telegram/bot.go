@@ -10,6 +10,7 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
 	"go-version-rewrite/internal/config"
+	"go-version-rewrite/internal/i18n"
 	"go-version-rewrite/internal/io"
 )
 
@@ -30,11 +31,19 @@ type BotSender interface {
 	Request(c tgbotapi.Chattable) (*tgbotapi.APIResponse, error)
 }
 
-// LangTexts stores the English and Chinese versions of a text string.
-type LangTexts struct {
-	EN string
-	ZH string
+// AfterInteractionFunc is a callback invoked after each update is processed.
+// sender is the current Bot's sender, tgID is the chat/user ID, lang is the detected language.
+type AfterInteractionFunc func(sender BotSender, tgID int64, lang string)
+
+// BotOptions holds optional configuration for Bot construction.
+type BotOptions struct {
+	Token            string               // Override config token (used for old Bots)
+	IsOld            bool                 // Marks this Bot as an old Bot
+	AfterInteraction AfterInteractionFunc // Callback fired after each interaction
 }
+
+// LangTexts is an alias for i18n.LangTexts.
+type LangTexts = i18n.LangTexts
 
 // ParsedCommand represents a parsed user command.
 type ParsedCommand struct {
@@ -55,237 +64,24 @@ type Bot struct {
 	sender BotSender        // used for all Send/Request calls
 	io     *io.IO
 	config *config.Config
-	texts  map[string]LangTexts
+	opts   BotOptions // optional configuration (AfterInteraction hook, etc.)
+	stopCh chan struct{} // closed by Stop() to terminate Start() loop
 }
 
-// defaultTexts contains all user-visible text in English and Chinese.
-var defaultTexts = map[string]LangTexts{
-	"welcome_new": {
-		EN: "👋 Welcome to Mail Bot!\nThis bot forwards emails to your Telegram.\nClick the button below to get started.",
-		ZH: "👋 欢迎使用邮件转发 Bot！\n本 Bot 可将邮件转发到你的 Telegram。\n点击下方按钮快速开始。",
-	},
-	"welcome_back": {
-		EN: "Welcome back! Choose an option:",
-		ZH: "欢迎回来！请选择操作：",
-	},
-	"help_title": {
-		EN: "📖 Help - Choose a category:",
-		ZH: "📖 帮助 - 请选择分类：",
-	},
-	"help_cat_domain": {
-		EN: "📬 Domain Management",
-		ZH: "📬 域名管理",
-	},
-	"help_cat_block": {
-		EN: "🚫 Block Management",
-		ZH: "🚫 屏蔽管理",
-	},
-	"help_cat_other": {
-		EN: "⚙️ Other",
-		ZH: "⚙️ 其他",
-	},
-	"help_detail_domain": {
-		EN: "<b>Domain Management</b>\n\n" +
-			"<b>/bind</b> <code>example.com</code>\nBind a domain to receive emails.\n\n" +
-			"<b>/dismiss</b> <code>example.com</code>\nUnbind a domain.\n\n" +
-			"<b>/list</b>\nList all your bound domains.",
-		ZH: "<b>域名管理</b>\n\n" +
-			"<b>/bind</b> <code>example.com</code>\n绑定域名以接收邮件。\n\n" +
-			"<b>/dismiss</b> <code>example.com</code>\n解绑域名。\n\n" +
-			"<b>/list</b>\n列出所有已绑定的域名。",
-	},
-	"help_detail_block": {
-		EN: "<b>Block Management</b>\n\n" +
-			"<b>/unblock_domain</b> <code>example.com</code>\nUnblock a sender domain.\n\n" +
-			"<b>/unblock_sender</b> <code>someone@example.com</code>\nUnblock a sender.\n\n" +
-			"<b>/unblock_receiver</b> <code>someone@example.com</code>\nUnblock a receiver.",
-		ZH: "<b>屏蔽管理</b>\n\n" +
-			"<b>/unblock_domain</b> <code>example.com</code>\n解封发件者域名。\n\n" +
-			"<b>/unblock_sender</b> <code>someone@example.com</code>\n解封发件者邮箱。\n\n" +
-			"<b>/unblock_receiver</b> <code>someone@example.com</code>\n解封收件人邮箱。",
-	},
-	"help_detail_other": {
-		EN: "<b>Other</b>\n\n" +
-			"<b>/send_all</b> <code>message</code>\nBroadcast a message to all users (admin only).",
-		ZH: "<b>其他</b>\n\n" +
-			"<b>/send_all</b> <code>消息内容</code>\n向所有用户广播消息（仅管理员）。",
-	},
-	"btn_quick_start": {
-		EN: "🚀 Quick Start",
-		ZH: "🚀 快速开始",
-	},
-	"btn_my_domains": {
-		EN: "📬 My Domains",
-		ZH: "📬 我的域名",
-	},
-	"btn_block_mgmt": {
-		EN: "🚫 Block Management",
-		ZH: "🚫 屏蔽管理",
-	},
-	"btn_help": {
-		EN: "❓ Help",
-		ZH: "❓ 帮助",
-	},
-	"btn_dismiss": {
-		EN: "🗑 Unbind",
-		ZH: "🗑 解绑",
-	},
-	"btn_confirm": {
-		EN: "✅ Confirm",
-		ZH: "✅ 确认",
-	},
-	"btn_cancel": {
-		EN: "❌ Cancel",
-		ZH: "❌ 取消",
-	},
-	"btn_back": {
-		EN: "⬅️ Back",
-		ZH: "⬅️ 返回",
-	},
-	"btn_unblock": {
-		EN: "🔓 Unblock",
-		ZH: "🔓 解除屏蔽",
-	},
-	"btn_view_help": {
-		EN: "📖 View Help",
-		ZH: "📖 查看帮助",
-	},
-	"btn_block_sender": {
-		EN: "Block Sender",
-		ZH: "屏蔽发件人",
-	},
-	"btn_block_domain": {
-		EN: "Block Domain",
-		ZH: "屏蔽域名",
-	},
-	"btn_block_receiver": {
-		EN: "Block Receiver",
-		ZH: "屏蔽收件人",
-	},
-	"btn_blocked_domains": {
-		EN: "🌐 Blocked Domains",
-		ZH: "🌐 屏蔽的域名",
-	},
-	"btn_blocked_senders": {
-		EN: "👤 Blocked Senders",
-		ZH: "👤 屏蔽的发件人",
-	},
-	"btn_blocked_receivers": {
-		EN: "📧 Blocked Receivers",
-		ZH: "📧 屏蔽的收件人",
-	},
-	"err_unknown_cmd": {
-		EN: "Unknown command. Tap the button below for help.",
-		ZH: "未识别的命令。点击下方按钮查看帮助。",
-	},
-	"err_invalid_domain": {
-		EN: "Invalid domain format. Example: <code>example.com</code>",
-		ZH: "域名格式无效。示例：<code>example.com</code>",
-	},
-	"err_invalid_email": {
-		EN: "Invalid email format. Example: <code>someone@example.com</code>",
-		ZH: "邮箱格式无效。示例：<code>someone@example.com</code>",
-	},
-	"err_bind_default_fail": {
-		EN: "Failed to bind a default domain. Please try /bind <domain> manually.",
-		ZH: "自动绑定默认域名失败，请手动使用 /bind <域名> 绑定。",
-	},
-	"usage_bind": {
-		EN: "Usage: <code>/bind example.com</code>",
-		ZH: "用法：<code>/bind example.com</code>",
-	},
-	"usage_dismiss": {
-		EN: "Usage: <code>/dismiss example.com</code>",
-		ZH: "用法：<code>/dismiss example.com</code>",
-	},
-	"usage_unblock_domain": {
-		EN: "Usage: <code>/unblock_domain example.com</code>",
-		ZH: "用法：<code>/unblock_domain example.com</code>",
-	},
-	"usage_unblock_sender": {
-		EN: "Usage: <code>/unblock_sender someone@example.com</code>",
-		ZH: "用法：<code>/unblock_sender someone@example.com</code>",
-	},
-	"usage_unblock_receiver": {
-		EN: "Usage: <code>/unblock_receiver someone@example.com</code>",
-		ZH: "用法：<code>/unblock_receiver someone@example.com</code>",
-	},
-	"msg_bind_success": {
-		EN: "✅ Domain <code>%s</code> bound successfully!\n\nPlease add an MX record pointing to <code>%s</code>\n\nExample: <code>someone@%s</code>",
-		ZH: "✅ 域名 <code>%s</code> 绑定成功！\n\n请添加 MX 记录指向 <code>%s</code>\n\n示例：<code>someone@%s</code>",
-	},
-	"msg_dismiss_success": {
-		EN: "✅ Domain unbound successfully.",
-		ZH: "✅ 域名已成功解绑。",
-	},
-	"msg_dismiss_cancel": {
-		EN: "Operation cancelled.",
-		ZH: "操作已取消。",
-	},
-	"msg_dismiss_confirm_prompt": {
-		EN: "Are you sure you want to unbind <code>%s</code>?",
-		ZH: "确定要解绑 <code>%s</code> 吗？",
-	},
-	"msg_block_success": {
-		EN: "✅ Blocked %s successfully.",
-		ZH: "✅ 已成功屏蔽 %s。",
-	},
-	"msg_unblock_success": {
-		EN: "✅ Unblocked %s successfully.",
-		ZH: "✅ 已成功解除屏蔽 %s。",
-	},
-	"msg_no_blocks": {
-		EN: "No blocked items.",
-		ZH: "暂无屏蔽项。",
-	},
-	"msg_broadcast_done": {
-		EN: "✅ Broadcast complete.",
-		ZH: "✅ 广播已发送。",
-	},
-	"msg_domain_already_yours": {
-		EN: "This domain is already bound to your account.",
-		ZH: "该域名已绑定到你的账户。",
-	},
-	"msg_domain_already_other": {
-		EN: "This domain is already bound to another account.",
-		ZH: "该域名已被其他账户绑定。",
-	},
-	"msg_domain_not_yours": {
-		EN: "This domain is not bound to your account.",
-		ZH: "该域名未绑定到你的账户。",
-	},
-	"msg_no_domains": {
-		EN: "You have no bound domains.\nUse /bind <code>example.com</code> to bind one.",
-		ZH: "你还没有绑定任何域名。\n使用 /bind <code>example.com</code> 来绑定。",
-	},
-	"msg_list_title": {
-		EN: "<b>Your domains:</b>",
-		ZH: "<b>你的域名：</b>",
-	},
-	"btn_main_menu": {
-		EN: "🏠 Main Menu",
-		ZH: "🏠 主菜单",
-	},
-	"btn_lang": {
-		EN: "🌐 Language",
-		ZH: "🌐 语言",
-	},
-	"msg_lang_select": {
-		EN: "Choose your language / 选择语言：",
-		ZH: "Choose your language / 选择语言：",
-	},
-	"msg_lang_set": {
-		EN: "✅ Language set to English.",
-		ZH: "✅ 语言已设置为中文。",
-	},
-	"btn_prev": {
-		EN: "⬅️ Prev",
-		ZH: "⬅️ 上一页",
-	},
-	"btn_next": {
-		EN: "➡️ Next",
-		ZH: "➡️ 下一页",
-	},
+// defaultTexts provides access to i18n keys for test compatibility.
+// Tests that iterate over defaultTexts should use i18n.AllKeys() instead.
+var defaultTexts = getDefaultTextsMap()
+
+func getDefaultTextsMap() map[string]LangTexts {
+	keys := i18n.AllKeys()
+	m := make(map[string]LangTexts, len(keys))
+	for _, k := range keys {
+		m[k] = LangTexts{
+			EN: i18n.Get(k, "en"),
+			ZH: i18n.Get(k, "zh"),
+		}
+	}
+	return m
 }
 
 // GenerateHelpMessages generates the English and Chinese help messages with the given mail domain.
@@ -358,34 +154,63 @@ func New(cfg *config.Config, ioModule *io.IO) (*Bot, error) {
 		return nil, fmt.Errorf("failed to create telegram bot: %w", err)
 	}
 
-	// Copy defaultTexts into the instance
-	texts := make(map[string]LangTexts, len(defaultTexts))
-	for k, v := range defaultTexts {
-		texts[k] = v
-	}
-
 	return &Bot{
 		bot:    botAPI,
 		sender: botAPI, // *tgbotapi.BotAPI implements BotSender
 		io:     ioModule,
 		config: cfg,
-		texts:  texts,
+		stopCh: make(chan struct{}),
 	}, nil
 }
 
 // NewForTest creates a Bot instance for testing with a mock BotSender.
 // The underlying bot field is nil, so Start() and GetBotAPI() should not be called in tests.
 func NewForTest(cfg *config.Config, ioModule *io.IO, sender BotSender) *Bot {
-	texts := make(map[string]LangTexts, len(defaultTexts))
-	for k, v := range defaultTexts {
-		texts[k] = v
-	}
-
 	return &Bot{
 		sender: sender,
 		io:     ioModule,
 		config: cfg,
-		texts:  texts,
+		stopCh: make(chan struct{}),
+	}
+}
+
+// NewWithOptions creates a Bot instance with custom options.
+// If opts.Token is non-empty, it overrides cfg.TelegramBotToken for this instance.
+// Used by MigrationManager to create old Bot instances with AfterInteraction hooks.
+func NewWithOptions(cfg *config.Config, ioModule *io.IO, opts BotOptions) (*Bot, error) {
+	token := cfg.TelegramBotToken
+	if opts.Token != "" {
+		token = opts.Token
+	}
+
+	if token == "" {
+		return nil, fmt.Errorf("telegram bot token is empty")
+	}
+
+	botAPI, err := tgbotapi.NewBotAPI(token)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create telegram bot: %w", err)
+	}
+
+	return &Bot{
+		bot:    botAPI,
+		sender: botAPI,
+		io:     ioModule,
+		config: cfg,
+		opts:   opts,
+		stopCh: make(chan struct{}),
+	}, nil
+}
+
+// NewForTestWithOptions creates a Bot instance for testing with a mock BotSender and options.
+// The underlying bot field is nil, so Start() and GetBotAPI() should not be called in tests.
+func NewForTestWithOptions(cfg *config.Config, ioModule *io.IO, sender BotSender, opts BotOptions) *Bot {
+	return &Bot{
+		sender: sender,
+		io:     ioModule,
+		config: cfg,
+		opts:   opts,
+		stopCh: make(chan struct{}),
 	}
 }
 
@@ -402,14 +227,7 @@ func (b *Bot) GetSender() BotSender {
 // getText returns the text for the given key and language.
 // Falls back to EN if the language is not "zh", or if the key is not found.
 func (b *Bot) getText(key string, lang string) string {
-	lt, ok := b.texts[key]
-	if !ok {
-		return ""
-	}
-	if lang == "zh" {
-		return lt.ZH
-	}
-	return lt.EN
+	return i18n.Get(key, lang)
 }
 
 // registerCommands registers all bot commands via the SetMyCommands API.
@@ -437,7 +255,7 @@ func (b *Bot) registerCommands() error {
 }
 
 // Start begins listening for Telegram messages and callback queries.
-// This method blocks indefinitely.
+// This method blocks until Stop() is called or the process exits.
 func (b *Bot) Start() {
 	if err := b.registerCommands(); err != nil {
 		log.Printf("warning: %v", err)
@@ -450,18 +268,65 @@ func (b *Bot) Start() {
 		updates := b.bot.GetUpdatesChan(u)
 
 		for update := range updates {
-			if update.CallbackQuery != nil {
-				b.handleCallbackQuery(update.CallbackQuery)
-				continue
+			// Check if stop was requested
+			select {
+			case <-b.stopCh:
+				b.bot.StopReceivingUpdates()
+				return
+			default:
 			}
+			b.processUpdate(update)
+		}
 
-			if update.Message != nil {
-				b.handleMessage(update.Message)
-			}
+		// Check if stop was requested before reconnecting
+		select {
+		case <-b.stopCh:
+			return
+		default:
 		}
 
 		log.Println("Telegram update channel closed, reconnecting in 5s...")
 		time.Sleep(5 * time.Second)
+	}
+}
+
+// Stop signals the Bot to stop receiving updates and exit Start().
+// Safe to call multiple times.
+func (b *Bot) Stop() {
+	select {
+	case <-b.stopCh:
+		// Already closed
+	default:
+		close(b.stopCh)
+	}
+	if b.bot != nil {
+		b.bot.StopReceivingUpdates()
+	}
+}
+
+// processUpdate handles a single update: dispatches to the appropriate handler
+// and fires the AfterInteraction hook if configured.
+func (b *Bot) processUpdate(update tgbotapi.Update) {
+	var tgID int64
+	var lang string
+
+	if update.CallbackQuery != nil {
+		if update.CallbackQuery.Message != nil {
+			tgID = update.CallbackQuery.Message.Chat.ID
+		} else {
+			tgID = int64(update.CallbackQuery.From.ID)
+		}
+		lang = b.detectLanguage(update.CallbackQuery.From)
+		b.handleCallbackQuery(update.CallbackQuery)
+	} else if update.Message != nil {
+		tgID = update.Message.Chat.ID
+		lang = b.detectLanguage(update.Message.From)
+		b.handleMessage(update.Message)
+	}
+
+	// Hook fires after handler returns, even for empty text messages
+	if b.opts.AfterInteraction != nil && tgID != 0 {
+		b.opts.AfterInteraction(b.sender, tgID, lang)
 	}
 }
 
@@ -807,7 +672,7 @@ func (b *Bot) handleBind(msg *tgbotapi.Message, lang string, args []string) {
 		return
 	}
 
-	b.io.BindDomain(msg.Chat.ID, domain)
+	b.io.BindDomainWith(b.sender, msg.Chat.ID, domain)
 	successText := fmt.Sprintf(b.getText("msg_bind_success", lang), domain, b.config.MailDomain, domain)
 	b.sendHTMLMessage(msg.Chat.ID, successText)
 }
@@ -826,7 +691,7 @@ func (b *Bot) handleDismiss(msg *tgbotapi.Message, lang string, args []string) {
 		return
 	}
 
-	b.io.RemoveDomain(msg.Chat.ID, domain)
+	b.io.RemoveDomainWith(b.sender, msg.Chat.ID, domain)
 }
 
 // handleUnblock handles the /unblock_domain, /unblock_sender, /unblock_receiver commands.
@@ -853,19 +718,19 @@ func (b *Bot) handleUnblock(msg *tgbotapi.Message, lang string, blockType string
 			b.sendHTMLMessage(msg.Chat.ID, b.getText("err_invalid_domain", lang))
 			return
 		}
-		b.io.RemoveBlockDomain(msg.Chat.ID, value)
+		b.io.RemoveBlockDomainWith(b.sender, msg.Chat.ID, value)
 	case "sender":
 		if !EmailRegex.MatchString(value) {
 			b.sendHTMLMessage(msg.Chat.ID, b.getText("err_invalid_email", lang))
 			return
 		}
-		b.io.RemoveBlockSender(msg.Chat.ID, value)
+		b.io.RemoveBlockSenderWith(b.sender, msg.Chat.ID, value)
 	case "receiver":
 		if !EmailRegex.MatchString(value) {
 			b.sendHTMLMessage(msg.Chat.ID, b.getText("err_invalid_email", lang))
 			return
 		}
-		b.io.RemoveBlockReceiver(msg.Chat.ID, value)
+		b.io.RemoveBlockReceiverWith(b.sender, msg.Chat.ID, value)
 	}
 }
 
@@ -881,7 +746,7 @@ func (b *Bot) handleSendAll(msg *tgbotapi.Message, args []string) {
 	}
 
 	message := strings.Join(args, " ")
-	b.io.SendAll(message)
+	b.io.SendAllWith(b.sender, message)
 
 	lang := b.detectLanguage(msg.From)
 	b.sendHTMLMessage(msg.Chat.ID, b.getText("msg_broadcast_done", lang))
@@ -892,11 +757,11 @@ func (b *Bot) handleSendAll(msg *tgbotapi.Message, args []string) {
 func (b *Bot) handleListBlock(msg *tgbotapi.Message, lang string, blockType string) {
 	switch blockType {
 	case "domain":
-		b.io.ListBlockDomain(msg.Chat.ID)
+		b.io.ListBlockDomainWith(b.sender, msg.Chat.ID)
 	case "sender":
-		b.io.ListBlockSender(msg.Chat.ID)
+		b.io.ListBlockSenderWith(b.sender, msg.Chat.ID)
 	case "receiver":
-		b.io.ListBlockReceiver(msg.Chat.ID)
+		b.io.ListBlockReceiverWith(b.sender, msg.Chat.ID)
 	}
 }
 
@@ -1109,7 +974,7 @@ func (b *Bot) handleHelpBack(query *tgbotapi.CallbackQuery, lang string) {
 // handleQuickStart handles the "Quick Start" callback: binds a default domain for the user.
 func (b *Bot) handleQuickStart(query *tgbotapi.CallbackQuery, lang string) {
 	chatID := query.Message.Chat.ID
-	domain := b.io.BindDefaultDomain(chatID)
+	domain := b.io.BindDefaultDomainWith(b.sender, chatID)
 
 	if domain == "" {
 		b.sendHTMLMessage(chatID, b.getText("err_bind_default_fail", lang))
@@ -1207,7 +1072,7 @@ func (b *Bot) handleDismissConfirm(query *tgbotapi.CallbackQuery, lang string, d
 	msg := query.Message
 	chatID := msg.Chat.ID
 
-	b.io.RemoveDomain(chatID, domain)
+	b.io.RemoveDomainWith(b.sender, chatID, domain)
 
 	// Edit message to show success (remove keyboard)
 	successText := b.getText("msg_dismiss_success", lang)
@@ -1232,11 +1097,11 @@ func (b *Bot) handleBlockAction(query *tgbotapi.CallbackQuery, lang string, bloc
 
 	switch blockType {
 	case "sender":
-		b.io.BlockSender(chatID, target)
+		b.io.BlockSenderWith(b.sender, chatID, target)
 	case "domain":
-		b.io.BlockDomain(chatID, target)
+		b.io.BlockDomainWith(b.sender, chatID, target)
 	case "receiver":
-		b.io.BlockReceiver(chatID, target)
+		b.io.BlockReceiverWith(b.sender, chatID, target)
 	}
 
 	successText := fmt.Sprintf(b.getText("msg_block_success", lang), target)
@@ -1249,11 +1114,11 @@ func (b *Bot) handleUnblockAction(query *tgbotapi.CallbackQuery, lang string, bl
 
 	switch blockType {
 	case "sender":
-		b.io.RemoveBlockSender(chatID, target)
+		b.io.RemoveBlockSenderWith(b.sender, chatID, target)
 	case "domain":
-		b.io.RemoveBlockDomain(chatID, target)
+		b.io.RemoveBlockDomainWith(b.sender, chatID, target)
 	case "receiver":
-		b.io.RemoveBlockReceiver(chatID, target)
+		b.io.RemoveBlockReceiverWith(b.sender, chatID, target)
 	}
 
 	// Re-render the block category list by calling handleBlockCategory

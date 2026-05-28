@@ -2,18 +2,20 @@ package io
 
 import (
 	"fmt"
-	"html"
 	"log"
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
+	htmltomarkdown "github.com/JohannesKaufmann/html-to-markdown/v2"
 	"github.com/brianvoe/gofakeit/v6"
 	"github.com/bwmarrin/snowflake"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
 	"go-version-rewrite/internal/config"
 	"go-version-rewrite/internal/db"
+	"go-version-rewrite/internal/i18n"
 	"go-version-rewrite/internal/lrucache"
 	smtpmod "go-version-rewrite/internal/smtp"
 )
@@ -24,11 +26,23 @@ var numericRegex = regexp.MustCompile(`^[0-9]+\.?[0-9]*$`)
 // emailRegex matches email addresses, used by HandleMail.
 var emailRegex = regexp.MustCompile(`(?i)[\w._\-+]+@[\w._\-+]+`)
 
+// mdImageRegex matches Markdown image syntax ![alt](url)
+var mdImageRegex = regexp.MustCompile(`!\[[^\]]*\]\([^\)]*\)`)
+
+// mdHeadingRegex matches Markdown heading prefixes (# ## ### etc.)
+var mdHeadingRegex = regexp.MustCompile(`(?m)^#{1,6}\s+`)
+
+// emptyLinkRegex matches empty-text Markdown links [](url)
+var emptyLinkRegex = regexp.MustCompile(`\[\]\([^\)]*\)`)
+
+// zeroWidthRegex matches zero-width characters and invisible Unicode used as preheader padding
+var zeroWidthRegex = regexp.MustCompile(`[\x{200B}\x{200C}\x{200D}\x{FEFF}\x{034F}\x{00AD}]+`)
+
 // IO is the core business logic module, corresponding to Node version modules/io.js.
 type IO struct {
 	domainToUser  sync.Map
 	db            *db.DB
-	bot           *tgbotapi.BotAPI
+	bot           TelegramSender
 	config        *config.Config
 	blockDomain   *lrucache.Cache
 	blockSender   *lrucache.Cache
@@ -76,26 +90,275 @@ func (o *IO) Init() error {
 }
 
 // SetBot sets the Telegram Bot instance.
-func (o *IO) SetBot(bot *tgbotapi.BotAPI) {
+func (o *IO) SetBot(bot TelegramSender) {
 	o.bot = bot
 }
 
-// FormatMailNotification formats a parsed email into an HTML notification string.
-// Uses bold field labels for From, To, Subject, and Time.
-// If the total message (headers + body) exceeds 4000 characters, truncates to headers only.
-// The lang parameter is reserved for future use (button labels are handled in HandleMail).
-func (o *IO) FormatMailNotification(mail *smtpmod.ParsedMail, lang string) string {
-	headers := "<b>From:</b> " + html.EscapeString(mail.From) + "\n" +
-		"<b>To:</b> " + html.EscapeString(mail.To) + "\n" +
-		"<b>Subject:</b> " + html.EscapeString(mail.Subject) + "\n" +
-		"<b>Time:</b> " + html.EscapeString(mail.Date)
-
-	full := headers + "\n\n" + html.EscapeString(mail.Text)
-
-	if len(full) > 4000 {
-		return headers
+// FormatMailNotification formats a parsed email into a Markdown notification string for Telegram.
+// Strategy:
+//  1. If HTML is available, convert to Markdown and clean for Telegram compatibility.
+//  2. If md exceeds limit and text is empty → truncate md to 3800 + hint to view full email.
+//  3. If md exceeds limit and text is non-empty → use text instead.
+//  4. If text also exceeds limit → truncate text to 3800 + hint to view full email.
+func (o *IO) FormatMailNotification(mail *smtpmod.ParsedMail, lang string, now ...time.Time) string {
+	t := time.Now()
+	if len(now) > 0 {
+		t = now[0]
 	}
-	return full
+	timeStr := FormatMailTime(mail.DateTime, mail.RawDate, lang, t)
+	headers := "*From:* " + escapeMdV2(mail.From) + "\n" +
+		"*To:* " + escapeMdV2(mail.To) + "\n" +
+		"*Subject:* " + escapeMdV2(mail.Subject) + "\n" +
+		"*Time:* " + escapeMdV2(timeStr)
+
+	truncHint := "\n\n\\.\\.\\.✂️ " + escapeMdV2(i18n.Get("msg_truncated", lang))
+
+	var body string
+	if mail.HTML != "" {
+		md, err := htmltomarkdown.ConvertString(mail.HTML)
+		if err == nil {
+			body = cleanMdForTelegram(strings.TrimSpace(md))
+		}
+	}
+
+	// If html2md produced a result, check length
+	if body != "" {
+		full := headers + "\n\n" + body
+		if len(full) <= 4000 {
+			return full
+		}
+		// md too long
+		if strings.TrimSpace(mail.Text) == "" {
+			// No text fallback available, truncate md
+			maxBody := 3800 - len(headers) - len("\n\n")
+			if maxBody > 0 && len(body) > maxBody {
+				body = body[:maxBody]
+				// Fix unclosed bold markers from truncation
+				body = fixUnclosedBold(body)
+			}
+			return headers + "\n\n" + body + truncHint
+		}
+		// Has text, fall through to text fallback
+	}
+
+	// Use plain text
+	textBody := escapeMdV2(mail.Text)
+	full := headers + "\n\n" + textBody
+	if len(full) <= 4000 {
+		return full
+	}
+
+	// Text also too long, truncate
+	maxBody := 3800 - len(headers) - len("\n\n")
+	if maxBody > 0 && len(textBody) > maxBody {
+		textBody = textBody[:maxBody]
+	}
+	return headers + "\n\n" + textBody + truncHint
+}
+
+// escapeMdV2 escapes special characters for Telegram MarkdownV2 parse mode.
+func escapeMdV2(s string) string {
+	// Characters that must be escaped in MarkdownV2:
+	// _ * [ ] ( ) ~ ` > # + - = | { } . !
+	replacer := strings.NewReplacer(
+		"\\", "\\\\",
+		"_", "\\_",
+		"*", "\\*",
+		"[", "\\[",
+		"]", "\\]",
+		"(", "\\(",
+		")", "\\)",
+		"~", "\\~",
+		"`", "\\`",
+		">", "\\>",
+		"#", "\\#",
+		"+", "\\+",
+		"-", "\\-",
+		"=", "\\=",
+		"|", "\\|",
+		"{", "\\{",
+		"}", "\\}",
+		".", "\\.",
+		"!", "\\!",
+	)
+	return replacer.Replace(s)
+}
+
+// cleanMdForTelegram takes html2md output and makes it Telegram MarkdownV2 compatible:
+// - Removes image syntax ![alt](url) (Telegram can't render images in text)
+// - Strips heading markers (# ## ###) keeping the text
+// - Escapes special chars in plain text segments while preserving [text](url) links
+// - Collapses excessive blank lines
+func cleanMdForTelegram(md string) string {
+	// Remove images (tracking pixels, logos, etc.)
+	md = mdImageRegex.ReplaceAllString(md, "")
+
+	// Remove empty-text links [](url) — leftover from image-in-link patterns like [![](img)](link)
+	md = emptyLinkRegex.ReplaceAllString(md, "")
+
+	// Remove zero-width/invisible characters (preheader padding junk)
+	md = zeroWidthRegex.ReplaceAllString(md, "")
+
+	// Remove heading markers, keep text
+	md = mdHeadingRegex.ReplaceAllString(md, "")
+
+	// Remove lines that are only whitespace (U+2002, U+00A0, regular spaces, tabs)
+	lines := strings.Split(md, "\n")
+	var cleaned []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		// Skip lines that are only invisible/whitespace chars
+		if trimmed == "" || trimmed == "‌" || strings.Trim(trimmed, " \t\u00A0\u2002\u2003\u200B‌") == "" {
+			cleaned = append(cleaned, "")
+		} else {
+			cleaned = append(cleaned, line)
+		}
+	}
+	md = strings.Join(cleaned, "\n")
+
+	// Collapse 3+ consecutive newlines into 2
+	for strings.Contains(md, "\n\n\n") {
+		md = strings.ReplaceAll(md, "\n\n\n", "\n\n")
+	}
+
+	md = strings.TrimSpace(md)
+
+	// Now we need to escape special chars for MarkdownV2, but preserve [text](url) links.
+	return escapeMdV2PreserveLinks(md)
+}
+
+// linkRegex matches Markdown links [text](url)
+var linkRegex = regexp.MustCompile(`\[([^\]]+)\]\(([^\)]+)\)`)
+
+// boldRegex matches **text** (bold in Markdown, also bold in Telegram MarkdownV2)
+var boldRegex = regexp.MustCompile(`\*\*([^\*]+)\*\*`)
+
+// italicRegex matches *text* (italic in Markdown, also italic in Telegram MarkdownV2)
+var italicRegex = regexp.MustCompile(`(?:^|[^*])\*([^*]+)\*(?:[^*]|$)`)
+
+// mdFormattingRegex matches all Markdown formatting we want to preserve: **bold**, *italic*, [link](url)
+// We process them in order of appearance to handle interleaving correctly.
+var mdTokenRegex = regexp.MustCompile(`\*\*[^\*]+\*\*|\[[^\]]+\]\([^\)]+\)`)
+
+// escapeMdV2PreserveFormatting escapes MarkdownV2 special chars but keeps
+// **bold**, *italic* (single), and [text](url) links intact.
+func escapeMdV2PreserveLinks(s string) string {
+	var result strings.Builder
+	lastIdx := 0
+
+	matches := mdTokenRegex.FindAllStringIndex(s, -1)
+	for _, match := range matches {
+		// Escape text before this token
+		if match[0] > lastIdx {
+			segment := s[lastIdx:match[0]]
+			result.WriteString(escapeMdV2KeepSingleBold(segment))
+		}
+		token := s[match[0]:match[1]]
+		if strings.HasPrefix(token, "[") {
+			// It's a link [text](url)
+			// Extract text and url
+			submatches := linkRegex.FindStringSubmatch(token)
+			if len(submatches) == 3 {
+				result.WriteString("[")
+				result.WriteString(escapeMdV2KeepSingleBold(submatches[1]))
+				result.WriteString("](")
+				result.WriteString(submatches[2])
+				result.WriteString(")")
+			} else {
+				result.WriteString(escapeMdV2KeepSingleBold(token))
+			}
+		} else if strings.HasPrefix(token, "**") {
+			// It's bold **text**
+			inner := token[2 : len(token)-2]
+			result.WriteString("*")
+			result.WriteString(escapeMdV2NoBold(inner))
+			result.WriteString("*")
+		}
+		lastIdx = match[1]
+	}
+	// Escape remaining text
+	if lastIdx < len(s) {
+		result.WriteString(escapeMdV2KeepSingleBold(s[lastIdx:]))
+	}
+	return result.String()
+}
+
+// singleBoldRegex matches *text* that is NOT part of **text**
+var singleBoldRegex = regexp.MustCompile(`(?:^|[^*])\*([^*]+)\*(?:[^*]|$)`)
+
+// escapeMdV2KeepSingleBold escapes all MdV2 special chars except preserves *text* as bold.
+func escapeMdV2KeepSingleBold(s string) string {
+	// Find *text* patterns (single asterisk bold/italic)
+	var result strings.Builder
+	lastIdx := 0
+
+	// Simple approach: find pairs of single * that are not **
+	inBold := false
+	runes := []byte(s)
+	i := 0
+	segStart := 0
+
+	for i < len(runes) {
+		if runes[i] == '*' {
+			// Check if it's ** (already handled by outer function)
+			if i+1 < len(runes) && runes[i+1] == '*' {
+				i += 2
+				continue
+			}
+			if !inBold {
+				// Opening *: escape everything before it
+				result.WriteString(escapeMdV2NoBold(s[segStart:i]))
+				result.WriteString("*")
+				inBold = true
+				segStart = i + 1
+			} else {
+				// Closing *: escape inner content, close bold
+				result.WriteString(escapeMdV2NoBold(s[segStart:i]))
+				result.WriteString("*")
+				inBold = false
+				segStart = i + 1
+			}
+		}
+		i++
+	}
+	// Remaining text
+	if segStart < len(s) {
+		if inBold {
+			// Unclosed *, treat the opening * as literal
+			result.WriteString(escapeMdV2NoBold("*" + s[segStart:]))
+		} else {
+			result.WriteString(escapeMdV2NoBold(s[segStart:]))
+		}
+	}
+	_ = lastIdx
+	return result.String()
+}
+
+// escapeMdV2NoBold escapes all MarkdownV2 special characters including *.
+func escapeMdV2NoBold(s string) string {
+	return escapeMdV2(s)
+}
+
+// fixUnclosedBold checks if a truncated MarkdownV2 string has an odd number of
+// unescaped * markers (meaning a bold/italic was cut in half). If so, removes
+// the last unmatched * to prevent Telegram parse errors.
+func fixUnclosedBold(s string) string {
+	count := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == '*' && (i == 0 || s[i-1] != '\\') {
+			count++
+		}
+	}
+	if count%2 == 0 {
+		return s // balanced
+	}
+	// Remove the last unescaped *
+	for i := len(s) - 1; i >= 0; i-- {
+		if s[i] == '*' && (i == 0 || s[i-1] != '\\') {
+			return s[:i] + s[i+1:]
+		}
+	}
+	return s
 }
 
 // HandleMail processes an incoming email: looks up the recipient domain,
@@ -184,8 +447,9 @@ func (o *IO) HandleMail(mail *smtpmod.ParsedMail) {
 		return
 	}
 
-	// Format email message using FormatMailNotification (default to English)
-	email := o.FormatMailNotification(mail, "en")
+	// Format email message using FormatMailNotification with user's language preference
+	lang := o.GetUserLang(tgID)
+	email := o.FormatMailNotification(mail, lang)
 
 	// Create inline keyboard with block buttons
 	blockSenderData := o.CheckButtonData(sender, "block_sender")
@@ -203,11 +467,11 @@ func (o *IO) HandleMail(mail *smtpmod.ParsedMail) {
 	// Send message with inline keyboard using HTML parse mode
 	if o.bot != nil {
 		msg := tgbotapi.NewMessage(tgID, email)
-		msg.ParseMode = "HTML"
+		msg.ParseMode = "MarkdownV2"
 		msg.ReplyMarkup = keyboard
 		if _, err := o.bot.Send(msg); err != nil {
-			log.Printf("failed to send mail message with HTML mode: %v\nMessage content:\n%s", err, email)
-			// Retry without HTML parse mode as fallback
+			log.Printf("failed to send mail message with MarkdownV2 mode: %v\nMessage content:\n%s", err, email)
+			// Retry without parse mode as fallback
 			msg.ParseMode = ""
 			if _, err := o.bot.Send(msg); err != nil {
 				log.Printf("failed to send mail message (fallback): %v", err)
@@ -277,9 +541,9 @@ func (o *IO) getBlockSet(tgKey string, c *lrucache.Cache, loader func() (map[str
 	return set
 }
 
-// BindDefaultDomain generates a random domain using gofakeit, binds it to the user,
-// and sends success messages via bot. Returns the domain string (empty if failed).
-func (o *IO) BindDefaultDomain(tgID int64) string {
+// BindDefaultDomainWith generates a random domain using gofakeit, binds it to the user,
+// and sends success messages via the given sender. Returns the domain string (empty if failed).
+func (o *IO) BindDefaultDomainWith(sender TelegramSender, tgID int64) string {
 	tryTime := 0
 	domain := strings.ToLower(gofakeit.FirstName()+gofakeit.LastName()) + "." + o.config.MailDomain
 
@@ -306,33 +570,27 @@ func (o *IO) BindDefaultDomain(tgID int64) string {
 	cnMsg := "绑定默认域名 : <code>" + domain + "</code> 成功! \n\n" +
 		"你可以发送邮件到该域名下的任何邮箱 \n\n 例如：<code>someone@" + domain + "</code> \n\n"
 
-	if o.bot != nil {
-		enMsgCfg := tgbotapi.NewMessage(tgID, enMsg)
-		enMsgCfg.ParseMode = "HTML"
-		if _, err := o.bot.Send(enMsgCfg); err != nil {
-			log.Printf("failed to send bind default domain EN message: %v", err)
-		}
-
-		cnMsgCfg := tgbotapi.NewMessage(tgID, cnMsg)
-		cnMsgCfg.ParseMode = "HTML"
-		if _, err := o.bot.Send(cnMsgCfg); err != nil {
-			log.Printf("failed to send bind default domain CN message: %v", err)
-		}
-	}
+	o.sendHTMLMessageWith(sender, tgID, enMsg)
+	o.sendHTMLMessageWith(sender, tgID, cnMsg)
 
 	return domain
 }
 
-// BindDomain binds a domain to the user. Returns the reply message string.
-func (o *IO) BindDomain(tgID int64, domain string) string {
+// BindDefaultDomain is a convenience method that uses o.bot as the sender.
+func (o *IO) BindDefaultDomain(tgID int64) string {
+	return o.BindDefaultDomainWith(o.bot, tgID)
+}
+
+// BindDomainWith binds a domain to the user, sending replies via the given sender. Returns the reply message string.
+func (o *IO) BindDomainWith(sender TelegramSender, tgID int64, domain string) string {
 	if val, exists := o.domainToUser.Load(domain); exists {
 		if val.(int64) == tgID {
 			msg := "This domain has already bind on your account!"
-			o.sendMessage(tgID, msg)
+			o.sendMessageWith(sender, tgID, msg)
 			return msg
 		}
 		msg := "This domain has already bind on another account!"
-		o.sendMessage(tgID, msg)
+		o.sendMessageWith(sender, tgID, msg)
 		return msg
 	}
 
@@ -340,29 +598,39 @@ func (o *IO) BindDomain(tgID int64, domain string) string {
 	o.db.InsertDomain(domain, tgID)
 
 	msg := "Bind Success!"
-	o.sendMessage(tgID, msg)
+	o.sendMessageWith(sender, tgID, msg)
 	return msg
 }
 
-// RemoveDomain removes a domain binding for the user. Returns the reply message string.
-func (o *IO) RemoveDomain(tgID int64, domain string) string {
+// BindDomain is a convenience method that uses o.bot as the sender.
+func (o *IO) BindDomain(tgID int64, domain string) string {
+	return o.BindDomainWith(o.bot, tgID, domain)
+}
+
+// RemoveDomainWith removes a domain binding for the user, sending replies via the given sender. Returns the reply message string.
+func (o *IO) RemoveDomainWith(sender TelegramSender, tgID int64, domain string) string {
 	if val, exists := o.domainToUser.Load(domain); exists {
 		if val.(int64) == tgID {
 			o.domainToUser.Delete(domain)
 			o.db.DeleteDomain(domain)
 			msg := "Release Success!"
-			o.sendMessage(tgID, msg)
+			o.sendMessageWith(sender, tgID, msg)
 			return msg
 		}
 	}
 
 	msg := "This domain has not bind to your account!"
-	o.sendMessage(tgID, msg)
+	o.sendMessageWith(sender, tgID, msg)
 	return msg
 }
 
-// ListDomain lists all domains bound to the user. Returns the formatted message string.
-func (o *IO) ListDomain(tgID int64) string {
+// RemoveDomain is a convenience method that uses o.bot as the sender.
+func (o *IO) RemoveDomain(tgID int64, domain string) string {
+	return o.RemoveDomainWith(o.bot, tgID, domain)
+}
+
+// ListDomainWith lists all domains bound to the user, sending via the given sender. Returns the formatted message string.
+func (o *IO) ListDomainWith(sender TelegramSender, tgID int64) string {
 	msg := "<b>Your domain :</b> \n\n"
 	count := 0
 
@@ -374,15 +642,14 @@ func (o *IO) ListDomain(tgID int64) string {
 		return true
 	})
 
-	if o.bot != nil {
-		msgCfg := tgbotapi.NewMessage(tgID, msg)
-		msgCfg.ParseMode = "HTML"
-		if _, err := o.bot.Send(msgCfg); err != nil {
-			log.Printf("failed to send list domain message: %v", err)
-		}
-	}
+	o.sendHTMLMessageWith(sender, tgID, msg)
 
 	return msg
+}
+
+// ListDomain is a convenience method that uses o.bot as the sender.
+func (o *IO) ListDomain(tgID int64) string {
+	return o.ListDomainWith(o.bot, tgID)
 }
 
 // GetUserDomains returns the list of domains bound to the given user.
@@ -409,25 +676,35 @@ func (o *IO) GetAllDomainCount(tgID int64) int {
 	return count
 }
 
-// sendMessage is a helper that sends a plain text message via bot if bot is set.
-func (o *IO) sendMessage(tgID int64, text string) {
-	if o.bot != nil {
+// sendMessageWith sends a plain text message via the given sender.
+func (o *IO) sendMessageWith(sender TelegramSender, tgID int64, text string) {
+	if sender != nil {
 		msg := tgbotapi.NewMessage(tgID, text)
-		if _, err := o.bot.Send(msg); err != nil {
+		if _, err := sender.Send(msg); err != nil {
 			log.Printf("failed to send message: %v", err)
 		}
 	}
 }
 
-// sendHTMLMessage is a helper that sends an HTML-formatted message via bot if bot is set.
-func (o *IO) sendHTMLMessage(tgID int64, text string) {
-	if o.bot != nil {
+// sendMessage is a convenience helper that sends a plain text message via o.bot.
+func (o *IO) sendMessage(tgID int64, text string) {
+	o.sendMessageWith(o.bot, tgID, text)
+}
+
+// sendHTMLMessageWith sends an HTML-formatted message via the given sender.
+func (o *IO) sendHTMLMessageWith(sender TelegramSender, tgID int64, text string) {
+	if sender != nil {
 		msg := tgbotapi.NewMessage(tgID, text)
 		msg.ParseMode = "HTML"
-		if _, err := o.bot.Send(msg); err != nil {
+		if _, err := sender.Send(msg); err != nil {
 			log.Printf("failed to send HTML message: %v", err)
 		}
 	}
+}
+
+// sendHTMLMessage is a convenience helper that sends an HTML-formatted message via o.bot.
+func (o *IO) sendHTMLMessage(tgID int64, text string) {
+	o.sendHTMLMessageWith(o.bot, tgID, text)
 }
 
 // getTrueBlockData checks if data is a pure numeric string. If so, retrieves the
@@ -455,71 +732,101 @@ func (o *IO) CheckButtonData(data string, key string) string {
 	return buttonData
 }
 
-// BlockSender blocks a sender for the given user. Returns the success message.
-func (o *IO) BlockSender(tgID int64, sender string) string {
-	data := o.getTrueBlockData(sender)
+// BlockSenderWith blocks a sender for the given user, sending replies via the given sender. Returns the success message.
+func (o *IO) BlockSenderWith(sender TelegramSender, tgID int64, senderAddr string) string {
+	data := o.getTrueBlockData(senderAddr)
 	o.db.InsertBlockSender(data, tgID)
 	o.blockSender.Delete(fmt.Sprintf("%d", tgID))
 
 	msg := "Block sender " + data + " Success!"
-	o.sendMessage(tgID, msg)
+	o.sendMessageWith(sender, tgID, msg)
 	return msg
 }
 
-// BlockDomain blocks a domain for the given user. Returns the success message.
-func (o *IO) BlockDomain(tgID int64, domain string) string {
+// BlockSender is a convenience method that uses o.bot as the sender.
+func (o *IO) BlockSender(tgID int64, senderAddr string) string {
+	return o.BlockSenderWith(o.bot, tgID, senderAddr)
+}
+
+// BlockDomainWith blocks a domain for the given user, sending replies via the given sender. Returns the success message.
+func (o *IO) BlockDomainWith(sender TelegramSender, tgID int64, domain string) string {
 	data := o.getTrueBlockData(domain)
 	o.db.InsertBlockDomain(data, tgID)
 	o.blockDomain.Delete(fmt.Sprintf("%d", tgID))
 
 	msg := "Block domain " + data + " Success!"
-	o.sendMessage(tgID, msg)
+	o.sendMessageWith(sender, tgID, msg)
 	return msg
 }
 
-// BlockReceiver blocks a receiver for the given user. Returns the success message.
-func (o *IO) BlockReceiver(tgID int64, receiver string) string {
+// BlockDomain is a convenience method that uses o.bot as the sender.
+func (o *IO) BlockDomain(tgID int64, domain string) string {
+	return o.BlockDomainWith(o.bot, tgID, domain)
+}
+
+// BlockReceiverWith blocks a receiver for the given user, sending replies via the given sender. Returns the success message.
+func (o *IO) BlockReceiverWith(sender TelegramSender, tgID int64, receiver string) string {
 	data := o.getTrueBlockData(receiver)
 	o.db.InsertBlockReceiver(data, tgID)
 	o.blockReceiver.Delete(fmt.Sprintf("%d", tgID))
 
 	msg := "Block receiver " + data + " Success!"
-	o.sendMessage(tgID, msg)
+	o.sendMessageWith(sender, tgID, msg)
 	return msg
 }
 
-// RemoveBlockSender removes a sender block for the given user. Returns the success message.
-func (o *IO) RemoveBlockSender(tgID int64, sender string) string {
-	o.db.DeleteBlockSender(sender, tgID)
+// BlockReceiver is a convenience method that uses o.bot as the sender.
+func (o *IO) BlockReceiver(tgID int64, receiver string) string {
+	return o.BlockReceiverWith(o.bot, tgID, receiver)
+}
+
+// RemoveBlockSenderWith removes a sender block for the given user, sending replies via the given sender. Returns the success message.
+func (o *IO) RemoveBlockSenderWith(sender TelegramSender, tgID int64, senderAddr string) string {
+	o.db.DeleteBlockSender(senderAddr, tgID)
 	o.blockSender.Delete(fmt.Sprintf("%d", tgID))
 
-	msg := "Remove block sender " + sender + " Success!"
-	o.sendMessage(tgID, msg)
+	msg := "Remove block sender " + senderAddr + " Success!"
+	o.sendMessageWith(sender, tgID, msg)
 	return msg
 }
 
-// RemoveBlockDomain removes a domain block for the given user. Returns the success message.
-func (o *IO) RemoveBlockDomain(tgID int64, domain string) string {
+// RemoveBlockSender is a convenience method that uses o.bot as the sender.
+func (o *IO) RemoveBlockSender(tgID int64, senderAddr string) string {
+	return o.RemoveBlockSenderWith(o.bot, tgID, senderAddr)
+}
+
+// RemoveBlockDomainWith removes a domain block for the given user, sending replies via the given sender. Returns the success message.
+func (o *IO) RemoveBlockDomainWith(sender TelegramSender, tgID int64, domain string) string {
 	o.db.DeleteBlockDomain(domain, tgID)
 	o.blockDomain.Delete(fmt.Sprintf("%d", tgID))
 
 	msg := "Remove block domain " + domain + " Success!"
-	o.sendMessage(tgID, msg)
+	o.sendMessageWith(sender, tgID, msg)
 	return msg
 }
 
-// RemoveBlockReceiver removes a receiver block for the given user. Returns the success message.
-func (o *IO) RemoveBlockReceiver(tgID int64, receiver string) string {
+// RemoveBlockDomain is a convenience method that uses o.bot as the sender.
+func (o *IO) RemoveBlockDomain(tgID int64, domain string) string {
+	return o.RemoveBlockDomainWith(o.bot, tgID, domain)
+}
+
+// RemoveBlockReceiverWith removes a receiver block for the given user, sending replies via the given sender. Returns the success message.
+func (o *IO) RemoveBlockReceiverWith(sender TelegramSender, tgID int64, receiver string) string {
 	o.db.DeleteBlockReceiver(receiver, tgID)
 	o.blockReceiver.Delete(fmt.Sprintf("%d", tgID))
 
 	msg := "Remove block receiver " + receiver + " Success!"
-	o.sendMessage(tgID, msg)
+	o.sendMessageWith(sender, tgID, msg)
 	return msg
 }
 
-// ListBlockSender lists all blocked senders for the given user. Returns the formatted HTML message.
-func (o *IO) ListBlockSender(tgID int64) string {
+// RemoveBlockReceiver is a convenience method that uses o.bot as the sender.
+func (o *IO) RemoveBlockReceiver(tgID int64, receiver string) string {
+	return o.RemoveBlockReceiverWith(o.bot, tgID, receiver)
+}
+
+// ListBlockSenderWith lists all blocked senders for the given user, sending via the given sender. Returns the formatted HTML message.
+func (o *IO) ListBlockSenderWith(sender TelegramSender, tgID int64) string {
 	msg := "<b>Your block sender :</b> \n\n"
 	count := 0
 
@@ -533,12 +840,17 @@ func (o *IO) ListBlockSender(tgID int64) string {
 		}
 	}
 
-	o.sendHTMLMessage(tgID, msg)
+	o.sendHTMLMessageWith(sender, tgID, msg)
 	return msg
 }
 
-// ListBlockDomain lists all blocked domains for the given user. Returns the formatted HTML message.
-func (o *IO) ListBlockDomain(tgID int64) string {
+// ListBlockSender is a convenience method that uses o.bot as the sender.
+func (o *IO) ListBlockSender(tgID int64) string {
+	return o.ListBlockSenderWith(o.bot, tgID)
+}
+
+// ListBlockDomainWith lists all blocked domains for the given user, sending via the given sender. Returns the formatted HTML message.
+func (o *IO) ListBlockDomainWith(sender TelegramSender, tgID int64) string {
 	msg := "<b>Your block domain :</b> \n\n"
 	count := 0
 
@@ -552,12 +864,17 @@ func (o *IO) ListBlockDomain(tgID int64) string {
 		}
 	}
 
-	o.sendHTMLMessage(tgID, msg)
+	o.sendHTMLMessageWith(sender, tgID, msg)
 	return msg
 }
 
-// ListBlockReceiver lists all blocked receivers for the given user. Returns the formatted HTML message.
-func (o *IO) ListBlockReceiver(tgID int64) string {
+// ListBlockDomain is a convenience method that uses o.bot as the sender.
+func (o *IO) ListBlockDomain(tgID int64) string {
+	return o.ListBlockDomainWith(o.bot, tgID)
+}
+
+// ListBlockReceiverWith lists all blocked receivers for the given user, sending via the given sender. Returns the formatted HTML message.
+func (o *IO) ListBlockReceiverWith(sender TelegramSender, tgID int64) string {
 	msg := "<b>Your block receiver :</b> \n\n"
 	count := 0
 
@@ -571,8 +888,13 @@ func (o *IO) ListBlockReceiver(tgID int64) string {
 		}
 	}
 
-	o.sendHTMLMessage(tgID, msg)
+	o.sendHTMLMessageWith(sender, tgID, msg)
 	return msg
+}
+
+// ListBlockReceiver is a convenience method that uses o.bot as the sender.
+func (o *IO) ListBlockReceiver(tgID int64) string {
+	return o.ListBlockReceiverWith(o.bot, tgID)
 }
 
 // GetBlockedSenders returns a slice of all blocked sender addresses for the given user.
@@ -638,8 +960,8 @@ func (o *IO) RetrieveCallbackData(id string) (string, bool) {
 	return val.(string), true
 }
 
-// SendAll sends a message to all unique users that have domain bindings.
-func (o *IO) SendAll(msg string) {
+// SendAllWith sends a message to all unique users that have domain bindings, via the given sender.
+func (o *IO) SendAllWith(sender TelegramSender, msg string) {
 	allUsers := make(map[int64]bool)
 	o.domainToUser.Range(func(key, value interface{}) bool {
 		allUsers[value.(int64)] = true
@@ -647,8 +969,13 @@ func (o *IO) SendAll(msg string) {
 	})
 
 	for tgID := range allUsers {
-		o.sendHTMLMessage(tgID, msg)
+		o.sendHTMLMessageWith(sender, tgID, msg)
 	}
+}
+
+// SendAll is a convenience method that uses o.bot as the sender.
+func (o *IO) SendAll(msg string) {
+	o.SendAllWith(o.bot, msg)
 }
 
 // GetUserLang returns the stored language preference for a user.

@@ -36,6 +36,7 @@ func TestRegisterCommands_GeneratesCorrectCommandList(t *testing.T) {
 		"start", "help", "list", "bind", "dismiss",
 		"unblock_domain", "unblock_sender", "unblock_receiver",
 		"list_block_domain", "list_block_sender", "list_block_receiver",
+		"lang",
 	}
 
 	if len(setCmd.Commands) != len(expectedCommands) {
@@ -133,8 +134,8 @@ func TestHandleStart_OldUser_WelcomeBackWithMainMenu(t *testing.T) {
 		t.Fatalf("expected InlineKeyboardMarkup, got %T", startMsg.ReplyMarkup)
 	}
 
-	if len(kb.InlineKeyboard) != 3 {
-		t.Fatalf("expected 3 rows (domains, blocks, help), got %d", len(kb.InlineKeyboard))
+	if len(kb.InlineKeyboard) != 4 {
+		t.Fatalf("expected 4 rows (domains, blocks, help, lang), got %d", len(kb.InlineKeyboard))
 	}
 
 	// Verify button labels
@@ -178,8 +179,8 @@ func TestHandleHelp_CategoryButtons(t *testing.T) {
 	msgCfg := sender.messages[0].(tgbotapi.MessageConfig)
 	kb := msgCfg.ReplyMarkup.(tgbotapi.InlineKeyboardMarkup)
 
-	if len(kb.InlineKeyboard) != 3 {
-		t.Fatalf("expected 3 category rows, got %d", len(kb.InlineKeyboard))
+	if len(kb.InlineKeyboard) != 4 {
+		t.Fatalf("expected 4 category rows (domain, block, other, back), got %d", len(kb.InlineKeyboard))
 	}
 
 	categories := []string{"Domain", "Block", "Other"}

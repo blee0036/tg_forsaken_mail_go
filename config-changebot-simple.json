@@ -1,0 +1,21 @@
+{
+  "mailin": {
+    "host": "0.0.0.0",
+    "port": 25,
+    "disableWebhook": true
+  },
+  "mail_domain": "YOUR_MAIL_DOMAIN",
+  "telegram_bot_token": "YOUR_NEW_BOT_TOKEN",
+  "admin_tg_id": "YOUR_ADMIN_TG_ID",
+  "upload_url": "",
+  "upload_token": "",
+  "old_telegram_bot_token": [
+    "YOUR_OLD_BOT_TOKEN_1",
+    "YOUR_OLD_BOT_TOKEN_2"
+  ],
+  "change_bot_alert_msg": {
+    "en": "⚠️ This bot will be discontinued soon. Please switch to @YourNewBot for uninterrupted mail forwarding.",
+    "zh": "⚠️ 此 Bot 即将停用，请尽快切换到 @YourNewBot 以继续接收邮件转发服务。"
+  },
+  "close_old_date": "2025-12-31"
+}

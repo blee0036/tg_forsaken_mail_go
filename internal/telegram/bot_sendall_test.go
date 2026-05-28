@@ -46,6 +46,13 @@ func (m *mockSender) sentTexts() []string {
 	return texts
 }
 
+func (m *mockSender) reset() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.messages = nil
+	m.requests = nil
+}
+
 // newTestBotWithMock creates a Bot with a mock sender and real IO backed by a temp SQLite DB.
 func newTestBotWithMock(t *testing.T, adminID int64) (*Bot, *mockSender) {
 	t.Helper()

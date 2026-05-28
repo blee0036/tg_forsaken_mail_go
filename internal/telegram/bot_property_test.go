@@ -1,7 +1,6 @@
 package telegram
 
 import (
-	"os"
 	"regexp"
 	"strings"
 	"testing"
@@ -323,6 +322,12 @@ func TestProperty_TextMappingCompleteness(t *testing.T) {
 	// Create a Bot instance with texts initialized
 	b := NewForTest(&config.Config{MailDomain: "test.example.com"}, nil, nil)
 
+	// Keys where ZH and EN are intentionally identical (e.g. language selection prompt
+	// shows both languages regardless of current setting)
+	identicalAllowed := map[string]bool{
+		"msg_lang_select": true,
+	}
+
 	properties.Property("all text keys have non-empty and distinct ZH and EN values", prop.ForAll(
 		func(idx int) bool {
 			key := allKeys[idx%len(allKeys)]
@@ -338,7 +343,7 @@ func TestProperty_TextMappingCompleteness(t *testing.T) {
 				t.Logf("getText(%q, \"en\") returned empty string", key)
 				return false
 			}
-			if zhText == enText {
+			if zhText == enText && !identicalAllowed[key] {
 				t.Logf("getText(%q): ZH and EN are identical: %q", key, zhText)
 				return false
 			}
@@ -581,18 +586,12 @@ func TestProperty_CallbackDataRoundTrip(t *testing.T) {
 }
 
 // newPropTestBotWithMock creates a Bot with a mock sender and real IO for property tests.
+// Uses in-memory SQLite for speed (no disk I/O per iteration).
 func newPropTestBotWithMock(t *testing.T, adminID int64) (*Bot, *mockSender) {
 	t.Helper()
-	tmpFile, err := os.CreateTemp("", "test-prop-*.db")
+	database, err := db.New(":memory:")
 	if err != nil {
-		t.Fatalf("failed to create temp db: %v", err)
-	}
-	tmpFile.Close()
-	t.Cleanup(func() { os.Remove(tmpFile.Name()) })
-
-	database, err := db.New(tmpFile.Name())
-	if err != nil {
-		t.Fatalf("failed to create db: %v", err)
+		t.Fatalf("failed to create in-memory db: %v", err)
 	}
 	t.Cleanup(func() { database.Close() })
 
@@ -633,11 +632,14 @@ func TestProperty_MissingArgsReturnsUsage(t *testing.T) {
 	genCmdIdx := gen.IntRange(0, len(cmds)-1)
 	genLang := gen.OneConstOf("en", "zh")
 
+	// Create bot once outside the property (no DB state needed for usage message tests)
+	bot, sender := newPropTestBotWithMock(t, 99999)
+
 	properties.Property(
 		"commands requiring args return usage containing the command name when called with empty args",
 		prop.ForAll(
 			func(cmdIdx int, lang string) bool {
-				bot, sender := newPropTestBotWithMock(t, 99999)
+				sender.reset()
 				msg := &tgbotapi.Message{
 					Chat: &tgbotapi.Chat{ID: 12345},
 					From: &tgbotapi.User{LanguageCode: lang},

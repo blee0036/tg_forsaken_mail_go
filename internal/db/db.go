@@ -460,6 +460,28 @@ func (d *DB) SelectUserAllBlockReceiver(tg int64) ([]BlockReceiver, error) {
 	return results, rows.Err()
 }
 
+// --- Migration helper operations ---
+
+// SelectAllUniqueTgIDs returns all unique tg IDs from the domain_tg table.
+// SQL: SELECT DISTINCT tg FROM domain_tg
+func (d *DB) SelectAllUniqueTgIDs() ([]int64, error) {
+	rows, err := d.db.Query("SELECT DISTINCT tg FROM domain_tg")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []int64
+	for rows.Next() {
+		var tg int64
+		if err := rows.Scan(&tg); err != nil {
+			return nil, err
+		}
+		results = append(results, tg)
+	}
+	return results, rows.Err()
+}
+
 // --- User settings operations (user_settings table) ---
 
 // GetUserLang returns the stored language preference for a user.

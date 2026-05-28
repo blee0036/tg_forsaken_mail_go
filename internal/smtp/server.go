@@ -43,7 +43,9 @@ type ParsedMail struct {
 	From        string
 	To          string
 	Subject     string
-	Date        string
+	Date        string     // Existing semantics: date.String() on success, raw header on failure
+	RawDate     string     // Always stores the raw Date header string
+	DateTime    *time.Time // Parsed time from header.Date(); nil on failure or absence
 	Text        string
 	HTML        string
 	Attachments []Attachment
@@ -156,9 +158,13 @@ func ParseMail(r io.Reader) (*ParsedMail, error) {
 		parsed.Subject = decodeRFC2047(header.Get("Subject"))
 	}
 
+	// Always save the raw Date header
+	parsed.RawDate = header.Get("Date")
+
 	if date, err := header.Date(); err == nil {
 		if !date.IsZero() {
 			parsed.Date = date.String()
+			parsed.DateTime = &date
 		}
 	} else {
 		parsed.Date = header.Get("Date")

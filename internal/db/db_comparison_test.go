@@ -54,12 +54,13 @@ func TestComparison_SchemaTablesMatchNodeVersion(t *testing.T) {
 		t.Fatalf("rows iteration error: %v", err)
 	}
 
-	// Expected tables from Node.js db.js
+	// Expected tables from Node.js db.js + Go-specific extensions
 	expectedTables := map[string]string{
 		"block_domain":   "CREATE TABLE block_domain ( domain TEXT, tg INTEGER )",
 		"block_receiver": "CREATE TABLE block_receiver ( receiver TEXT, tg INTEGER )",
 		"block_sender":   "CREATE TABLE block_sender ( sender TEXT, tg INTEGER )",
 		"domain_tg":      "CREATE TABLE domain_tg ( domain TEXT PRIMARY KEY, tg INTEGER )",
+		"user_settings":  "CREATE TABLE user_settings ( tg INTEGER PRIMARY KEY, lang TEXT DEFAULT '' )",
 	}
 
 	// Expected indexes from Node.js db.js
@@ -127,14 +128,14 @@ func TestComparison_SchemaTablesMatchNodeVersion(t *testing.T) {
 func TestComparison_SchemaTableCount(t *testing.T) {
 	d := newTestDB(t)
 
-	// Node.js db.js creates exactly 4 tables
+	// Go version creates 5 tables (4 from Node.js + user_settings)
 	var tableCount int
 	err := d.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table'`).Scan(&tableCount)
 	if err != nil {
 		t.Fatalf("failed to count tables: %v", err)
 	}
-	if tableCount != 4 {
-		t.Errorf("expected 4 tables (matching Node.js db.js), got %d", tableCount)
+	if tableCount != 5 {
+		t.Errorf("expected 5 tables, got %d", tableCount)
 	}
 
 	// Node.js db.js creates exactly 3 explicit indexes

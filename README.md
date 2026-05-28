@@ -137,6 +137,80 @@ systemctl enable --now tg-mail-bot
 | `/list_block_sender` | List blocked senders / 列出屏蔽的发件人 |
 | `/list_block_receiver` | List blocked receivers / 列出屏蔽的收件人 |
 
+## Bot Migration / Bot 迁移功能
+
+When you need to switch users from an old Bot to a new Bot, the system supports a smooth migration process: old Bots continue to receive interactions and deliver emails during the transition, while sending migration alerts to guide users to the new Bot.
+
+当你需要将用户从旧 Bot 迁移到新 Bot 时，系统支持平滑迁移：旧 Bot 在过渡期内继续接收交互和投递邮件，同时发送迁移提醒引导用户切换到新 Bot。
+
+### Migration Config Fields / 迁移配置字段
+
+Copy the example config to get started / 复制示例配置快速开始：
+
+```bash
+cp config-changebot-simple.json config.json
+```
+
+```json
+{
+  "telegram_bot_token": "YOUR_NEW_BOT_TOKEN",
+  "old_telegram_bot_token": [
+    "YOUR_OLD_BOT_TOKEN_1",
+    "YOUR_OLD_BOT_TOKEN_2"
+  ],
+  "change_bot_alert_msg": {
+    "en": "⚠️ This bot will be discontinued soon. Please switch to @YourNewBot for uninterrupted mail forwarding.",
+    "zh": "⚠️ 此 Bot 即将停用，请尽快切换到 @YourNewBot 以继续接收邮件转发服务。"
+  },
+  "close_old_date": "2025-12-31"
+}
+```
+
+| Field | Required | Description / 说明 |
+|-------|----------|-------------------|
+| `old_telegram_bot_token` | No | Array of old Bot tokens to migrate from. Empty strings, duplicates, and tokens matching the main `telegram_bot_token` are automatically filtered. / 旧 Bot Token 数组。空字符串、重复项和与主 Token 相同的条目会被自动过滤。 |
+| `change_bot_alert_msg` | No | Map of language code → migration alert message (supports Markdown). At least `"en"` and `"zh"` recommended. Entries with blank keys or values are ignored. / 语言代码→迁移提醒消息的映射（支持 Markdown）。建议至少配置 `"en"` 和 `"zh"`。空白 key 或 value 的条目会被忽略。 |
+| `close_old_date` | No | Date (`YYYY-MM-DD`) after which old Bots stop delivering emails and daily alerts. Interactions still trigger alerts. Invalid format causes startup failure. / 旧 Bot 停止投递邮件和每日推送的截止日期。到期后交互仍会触发提醒。格式不合法会导致启动失败。 |
+
+### How It Works / 使用流程
+
+1. **Create a new Bot** via [@BotFather](https://t.me/BotFather) and set its token as `telegram_bot_token` in config.json.
+
+   通过 @BotFather 创建新 Bot，将其 Token 设为 config.json 中的 `telegram_bot_token`。
+
+2. **Move old Bot token(s)** to the `old_telegram_bot_token` array.
+
+   将旧 Bot Token 移入 `old_telegram_bot_token` 数组。
+
+3. **Configure alert messages** in `change_bot_alert_msg` with your preferred languages. Messages support Markdown formatting. Language fallback order: exact match → prefix normalization (e.g. `zh-Hans` → `zh`) → `"en"` → `"zh"` → first key alphabetically.
+
+   在 `change_bot_alert_msg` 中配置各语言的迁移提醒消息，支持 Markdown 格式。语言回退顺序：精确匹配 → 前缀归一化（如 `zh-Hans` → `zh`）→ `"en"` → `"zh"` → 按 key 字典序第一个。
+
+4. **Optionally set `close_old_date`** to a future date. After this date, old Bots will stop delivering emails and daily push alerts, but will still send migration alerts when users interact with them.
+
+   可选设置 `close_old_date` 为未来日期。到期后旧 Bot 停止投递邮件和每日推送，但用户与旧 Bot 交互时仍会收到迁移提醒。
+
+5. **Restart the service**. The system will start listening on all old Bots and the new Bot simultaneously.
+
+   重启服务。系统将同时监听所有旧 Bot 和新 Bot。
+
+### Migration Behavior / 迁移行为
+
+- **Email delivery / 邮件投递**: New emails are delivered through ALL Bots (new + old). Old Bot deliveries are followed by a migration alert. / 新邮件通过所有 Bot（新+旧）投递，旧 Bot 投递后附加迁移提醒。
+- **User interaction / 用户交互**: When a user interacts with an old Bot, the interaction is handled normally, then a migration alert is sent. / 用户与旧 Bot 交互时，正常处理后发送迁移提醒。
+- **Daily push / 每日推送**: At 00:00 server local time, all unique users receive a migration alert via old Bots (not the new Bot). / 每日 0:00（服务器本地时间），所有唯一用户通过旧 Bot 收到迁移提醒。
+- **Close date / 截止日期**: After `close_old_date`, old Bots stop email delivery and daily push, but interaction alerts continue. / 到达 `close_old_date` 后，旧 Bot 停止邮件投递和每日推送，但交互提醒继续。
+
+### Notes / 注意事项
+
+- All migration fields are **optional**. Without them, the system runs exactly as before. / 所有迁移字段均为**可选**，不配置时系统行为与之前完全一致。
+- All Bots (new and old) share the same database and user bindings. / 所有 Bot（新旧）共享同一数据库和用户绑定关系。
+- If an old Bot token is invalid, it is skipped with a log warning; other Bots start normally. / 旧 Bot Token 无效时跳过并记录日志，不影响其他 Bot 启动。
+- Alert send failures are handled gracefully (Markdown → plain text retry → log and continue). / Alert 发送失败时优雅处理（Markdown → 纯文本重试 → 记录日志并继续）。
+- See `config-changebot-simple.json` for a complete example configuration. / 完整配置示例请参考 `config-changebot-simple.json`。
+
+---
+
 ## Advanced: HTML Email Viewer via Cloudflare Worker / 进阶：通过 Cloudflare Worker 查看 HTML 邮件
 
 When an email contains HTML content, the bot can upload it to a Cloudflare Worker so you can view the full rendered email in a browser. This requires configuring `upload_url` and `upload_token` in `config.json`, and deploying a Cloudflare Worker with a D1 database.
@@ -233,10 +307,12 @@ go_version/
 │   ├── config/       # Config loading / 配置加载
 │   ├── db/           # SQLite database / 数据库层
 │   ├── io/           # Business logic / 业务逻辑
+│   ├── migration/    # Bot migration manager / Bot 迁移管理
 │   ├── smtp/         # SMTP server / SMTP 服务
 │   ├── telegram/     # Telegram bot
 │   ├── upload/       # HTML upload client / HTML 上传
 │   └── lrucache/     # LRU cache / LRU 缓存
 ├── config-simple.json
+├── config-changebot-simple.json  # Migration config example / 迁移配置示例
 └── Dockerfile
 ```

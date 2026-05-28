@@ -5,10 +5,12 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"time"
 
 	"go-version-rewrite/internal/config"
 	"go-version-rewrite/internal/db"
 	"go-version-rewrite/internal/io"
+	"go-version-rewrite/internal/migration"
 	"go-version-rewrite/internal/smtp"
 	"go-version-rewrite/internal/telegram"
 	"go-version-rewrite/internal/upload"
@@ -48,7 +50,7 @@ func main() {
 	}
 	log.Println("Telegram bot created successfully")
 
-	// 5. Set bot on IO
+	// 5. Set bot on IO (SetBot accepts TelegramSender interface)
 	ioModule.SetBot(bot.GetBotAPI())
 
 	// 6. Wire up upload function if upload_url is configured
@@ -58,11 +60,41 @@ func main() {
 		log.Println("HTML upload configured")
 	}
 
-	// 7. Create SMTP server, register handler, then start in goroutine
+	// 7. Create SMTP server
 	smtpServer := smtp.New(cfg.Mailin.Host, cfg.Mailin.Port)
-	smtpServer.OnMessage(ioModule.HandleMail)
-	log.Println("Mail handler registered")
 
+	// 8. Migration setup: create MigrationManager if old tokens are configured
+	var migrationManager *migration.MigrationManager
+	if len(cfg.OldTelegramBotTokens) > 0 {
+		migrationManager = migration.NewMigrationManager(cfg, ioModule, bot)
+		log.Printf("Migration manager created with %d old bot token(s)", len(cfg.OldTelegramBotTokens))
+
+		// Register SMTP handler with multi-delivery path
+		smtpServer.OnMessage(func(mail *smtp.ParsedMail) {
+			endpoints := migrationManager.ActiveMailEndpoints(time.Now())
+			ioModule.HandleMailMulti(mail, endpoints, migrationManager.AlertFunc(), time.Now())
+		})
+		log.Println("Mail handler registered (multi-bot delivery)")
+
+		// Start CronScheduler if alert is configured and close_old_date not yet reached
+		alertSender := migration.NewAlertSender(cfg)
+		if alertSender.HasAlert() && !migrationManager.IsCloseOldDateReached() {
+			cronScheduler := migration.NewCronScheduler(cfg, ioModule, database, migrationManager.OldBots(), alertSender)
+			migrationManager.SetCronScheduler(cronScheduler)
+			go cronScheduler.Start()
+			log.Println("Cron scheduler started for daily migration alerts")
+		}
+
+		// Start MigrationManager (non-blocking: launches old bot goroutines)
+		migrationManager.Start()
+		log.Println("Migration manager started (old bots listening)")
+	} else {
+		// No migration: register original single-bot handler
+		smtpServer.OnMessage(ioModule.HandleMail)
+		log.Println("Mail handler registered")
+	}
+
+	// 9. Start SMTP server in goroutine
 	go func() {
 		if err := smtpServer.Start(); err != nil {
 			log.Printf("SMTP server error: %v", err)
@@ -71,7 +103,7 @@ func main() {
 	}()
 	log.Printf("SMTP server starting on %s:%d", cfg.Mailin.Host, cfg.Mailin.Port)
 
-	// 9. Start pprof server for debugging (localhost only)
+	// 10. Start pprof server for debugging (localhost only)
 	go func() {
 		log.Println("pprof server listening on :6060")
 		if err := http.ListenAndServe("127.0.0.1:6060", nil); err != nil {
@@ -79,7 +111,7 @@ func main() {
 		}
 	}()
 
-	// 10. Start bot listening (blocking)
+	// 11. Start bot listening (blocking)
 	log.Println("Bot is running, listening for Telegram messages...")
 	bot.Start()
 }

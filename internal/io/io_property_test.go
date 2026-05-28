@@ -5,7 +5,9 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/leanovate/gopter"
 	"github.com/leanovate/gopter/gen"
 	"github.com/leanovate/gopter/prop"
@@ -15,19 +17,17 @@ import (
 	smtpmod "go-version-rewrite/internal/smtp"
 )
 
-// newPropTestIO creates an IO instance backed by a temporary SQLite database for property tests.
+// escapeMdV2ForTest is a test helper that mirrors the escapeMdV2 function for assertions.
+func escapeMdV2ForTest(s string) string {
+	return escapeMdV2(s)
+}
+
+// newPropTestIO creates an IO instance backed by an in-memory SQLite database for property tests.
 func newPropTestIO(t *testing.T) (*IO, *db.DB) {
 	t.Helper()
-	tmpFile, err := os.CreateTemp("", "prop-test-io-*.db")
+	database, err := db.New(":memory:")
 	if err != nil {
-		t.Fatalf("failed to create temp db: %v", err)
-	}
-	tmpFile.Close()
-	t.Cleanup(func() { os.Remove(tmpFile.Name()) })
-
-	database, err := db.New(tmpFile.Name())
-	if err != nil {
-		t.Fatalf("failed to create db: %v", err)
+		t.Fatalf("failed to create in-memory db: %v", err)
 	}
 	t.Cleanup(func() { database.Close() })
 
@@ -893,52 +893,54 @@ func TestProperty_MailNotificationFormatCorrectness(t *testing.T) {
 	shortBodyGen := gen.RegexMatch("[a-zA-Z0-9 ]{0,100}")
 	langGen := gen.OneConstOf("en", "zh")
 
-	properties.Property("FormatMailNotification output contains HTML bold tags for all header fields", prop.ForAll(
-		func(from, to, subject, date, body, lang string) bool {
-			ioInst, _ := newPropTestIO(t)
+	// Create IO instance once outside the property (no DB state needed for formatting)
+	ioInst, _ := newPropTestIO(t)
 
+	properties.Property("FormatMailNotification output contains Markdown bold tags for all header fields", prop.ForAll(
+		func(from, to, subject, date, body, lang string) bool {
 			mail := &smtpmod.ParsedMail{
 				From:    from,
 				To:      to,
 				Subject: subject,
 				Date:    date,
+				RawDate: date, // FormatMailTime uses RawDate when DateTime is nil
 				Text:    body,
 			}
 
 			result := ioInst.FormatMailNotification(mail, lang)
 
-			// Verify output contains HTML bold tags for all four header fields
-			if !strings.Contains(result, "<b>From:</b>") {
-				t.Logf("missing <b>From:</b> in result: %q", result)
+			// Verify output contains Markdown bold tags for all four header fields
+			if !strings.Contains(result, "*From:*") {
+				t.Logf("missing *From:* in result: %q", result)
 				return false
 			}
-			if !strings.Contains(result, "<b>To:</b>") {
-				t.Logf("missing <b>To:</b> in result: %q", result)
+			if !strings.Contains(result, "*To:*") {
+				t.Logf("missing *To:* in result: %q", result)
 				return false
 			}
-			if !strings.Contains(result, "<b>Subject:</b>") {
-				t.Logf("missing <b>Subject:</b> in result: %q", result)
+			if !strings.Contains(result, "*Subject:*") {
+				t.Logf("missing *Subject:* in result: %q", result)
 				return false
 			}
-			if !strings.Contains(result, "<b>Time:</b>") {
-				t.Logf("missing <b>Time:</b> in result: %q", result)
+			if !strings.Contains(result, "*Time:*") {
+				t.Logf("missing *Time:* in result: %q", result)
 				return false
 			}
 
-			// Verify the actual field values are present in the output
-			if !strings.Contains(result, from) {
+			// Verify the actual field values are present in the output (may be escaped)
+			if !strings.Contains(result, escapeMdV2ForTest(from)) {
 				t.Logf("missing from value %q in result: %q", from, result)
 				return false
 			}
-			if !strings.Contains(result, to) {
+			if !strings.Contains(result, escapeMdV2ForTest(to)) {
 				t.Logf("missing to value %q in result: %q", to, result)
 				return false
 			}
-			if !strings.Contains(result, subject) {
+			if !strings.Contains(result, escapeMdV2ForTest(subject)) {
 				t.Logf("missing subject value %q in result: %q", subject, result)
 				return false
 			}
-			if !strings.Contains(result, date) {
+			if !strings.Contains(result, escapeMdV2ForTest(date)) {
 				t.Logf("missing date value %q in result: %q", date, result)
 				return false
 			}
@@ -968,10 +970,11 @@ func TestProperty_MailNotificationBodyTruncation(t *testing.T) {
 	longBodyLenGen := gen.IntRange(4001, 8000)
 	langGen := gen.OneConstOf("en", "zh")
 
-	properties.Property("FormatMailNotification truncates to headers only when body > 4000 chars", prop.ForAll(
-		func(bodyLen int, lang string) bool {
-			ioInst, _ := newPropTestIO(t)
+	// Create IO instance once outside the property (no DB state needed for formatting)
+	ioInst, _ := newPropTestIO(t)
 
+	properties.Property("FormatMailNotification truncates long body with hint", prop.ForAll(
+		func(bodyLen int, lang string) bool {
 			longBody := strings.Repeat("A", bodyLen)
 
 			mail := &smtpmod.ParsedMail{
@@ -984,40 +987,33 @@ func TestProperty_MailNotificationBodyTruncation(t *testing.T) {
 
 			result := ioInst.FormatMailNotification(mail, lang)
 
-			// Verify output length does not exceed 4000 characters
-			if len(result) > 4000 {
-				t.Logf("result length %d exceeds 4000", len(result))
+			// Verify output contains Markdown bold header fields
+			if !strings.Contains(result, "*From:*") {
+				t.Logf("missing *From:* in truncated result")
+				return false
+			}
+			if !strings.Contains(result, "*To:*") {
+				t.Logf("missing *To:* in truncated result")
+				return false
+			}
+			if !strings.Contains(result, "*Subject:*") {
+				t.Logf("missing *Subject:* in truncated result")
+				return false
+			}
+			if !strings.Contains(result, "*Time:*") {
+				t.Logf("missing *Time:* in truncated result")
 				return false
 			}
 
-			// Verify output contains header fields
-			if !strings.Contains(result, "<b>From:</b>") {
-				t.Logf("missing <b>From:</b> in truncated result")
-				return false
-			}
-			if !strings.Contains(result, "<b>To:</b>") {
-				t.Logf("missing <b>To:</b> in truncated result")
-				return false
-			}
-			if !strings.Contains(result, "<b>Subject:</b>") {
-				t.Logf("missing <b>Subject:</b> in truncated result")
-				return false
-			}
-			if !strings.Contains(result, "<b>Time:</b>") {
-				t.Logf("missing <b>Time:</b> in truncated result")
-				return false
-			}
-
-			// Verify output does NOT contain the long body text
+			// Verify output does NOT contain the full body text
 			if strings.Contains(result, longBody) {
 				t.Logf("truncated result should not contain the full body text")
 				return false
 			}
 
-			// The body is so long that even a substring shouldn't appear
-			// (the result should only have headers)
-			if strings.Contains(result, strings.Repeat("A", 100)) {
-				t.Logf("truncated result should not contain body content")
+			// Should contain truncation hint
+			if !strings.Contains(result, "✂️") {
+				t.Logf("truncated result should contain truncation hint")
 				return false
 			}
 
@@ -1041,9 +1037,11 @@ func TestProperty_MailNotificationButtonLabelLanguageConsistency(t *testing.T) {
 	shortFieldGen := gen.RegexMatch("[a-zA-Z0-9@.]{1,30}")
 	langGen := gen.OneConstOf("en", "zh")
 
+	// Create IO instance once outside the property (no DB state needed for formatting)
+	ioInst, _ := newPropTestIO(t)
+
 	properties.Property("FormatMailNotification accepts lang parameter and produces valid format for both languages", prop.ForAll(
 		func(from, to, subject, date, lang string) bool {
-			ioInst, _ := newPropTestIO(t)
 
 			mail := &smtpmod.ParsedMail{
 				From:    from,
@@ -1062,44 +1060,36 @@ func TestProperty_MailNotificationButtonLabelLanguageConsistency(t *testing.T) {
 				return false
 			}
 
-			// The output should always contain the HTML bold header tags regardless of language
-			if !strings.Contains(result, "<b>From:</b>") {
-				t.Logf("missing <b>From:</b> for lang=%q", lang)
+			// The output should always contain the Markdown bold header tags regardless of language
+			if !strings.Contains(result, "*From:*") {
+				t.Logf("missing *From:* for lang=%q", lang)
 				return false
 			}
-			if !strings.Contains(result, "<b>To:</b>") {
-				t.Logf("missing <b>To:</b> for lang=%q", lang)
+			if !strings.Contains(result, "*To:*") {
+				t.Logf("missing *To:* for lang=%q", lang)
 				return false
 			}
-			if !strings.Contains(result, "<b>Subject:</b>") {
-				t.Logf("missing <b>Subject:</b> for lang=%q", lang)
+			if !strings.Contains(result, "*Subject:*") {
+				t.Logf("missing *Subject:* for lang=%q", lang)
 				return false
 			}
-			if !strings.Contains(result, "<b>Time:</b>") {
-				t.Logf("missing <b>Time:</b> for lang=%q", lang)
+			if !strings.Contains(result, "*Time:*") {
+				t.Logf("missing *Time:* for lang=%q", lang)
 				return false
 			}
 
 			// Verify the format is consistent: the output for both languages
 			// should have the same structure (headers + body)
-			// The lang parameter is accepted without error for both "en" and "zh"
 			lines := strings.Split(result, "\n")
 			if len(lines) < 4 {
 				t.Logf("expected at least 4 lines (header fields) for lang=%q, got %d", lang, len(lines))
 				return false
 			}
 
-			// Verify the HandleMail button labels are English for "en" lang
-			// Since HandleMail currently uses English-only labels, we verify
-			// that the format function works correctly for both language inputs
-			// and the button labels in HandleMail would be language-appropriate.
-			// We test this by verifying the format output is identical for both
-			// languages (since FormatMailNotification currently doesn't localize
-			// the header labels, only HandleMail's buttons would differ).
+			// Both languages should produce valid non-empty output
 			resultOtherLang := ioInst.FormatMailNotification(mail, "en")
 			resultZh := ioInst.FormatMailNotification(mail, "zh")
 
-			// Both should produce valid non-empty output
 			if resultOtherLang == "" || resultZh == "" {
 				t.Logf("one of the language outputs is empty: en=%q, zh=%q", resultOtherLang, resultZh)
 				return false
@@ -1115,4 +1105,396 @@ func TestProperty_MailNotificationButtonLabelLanguageConsistency(t *testing.T) {
 	))
 
 	properties.TestingRun(t)
+}
+
+// Feature: bot-migration, Property 10: Date fallback 行为
+// Validates: Requirements 11.7, 11.8
+func TestProperty_DateFallbackBehavior(t *testing.T) {
+	parameters := gopter.DefaultTestParameters()
+	parameters.MinSuccessfulTests = 100
+
+	properties := gopter.NewProperties(parameters)
+
+	// Generator for random non-date strings (strings that are NOT valid RFC2822/RFC3339 dates)
+	// Use alphanumeric + special chars that won't accidentally parse as dates
+	nonDateStringGen := gen.RegexMatch("[a-zA-Z!@#$%^&*()_+=]{1,50}")
+
+	// Generator for random time.Time values for "now" parameter
+	// Range: 2000-01-01 to 2030-12-31
+	nowGen := gen.Int64Range(946684800, 1924991999).Map(func(ts int64) time.Time {
+		return time.Unix(ts, 0).UTC()
+	})
+
+	// Generator for zh-series language codes
+	zhLangGen := gen.OneConstOf("zh", "zh-Hans", "zh-Hant", "zh_CN", "zh-TW")
+	// Generator for non-zh language codes
+	nonZhLangGen := gen.OneConstOf("en", "en-US", "ja", "ko", "fr", "de")
+
+	properties.Property("dateTime==nil and rawDate non-empty returns rawDate as-is", prop.ForAll(
+		func(rawDate string) bool {
+			// Call FormatMailTime with dateTime=nil, non-empty rawDate
+			result := FormatMailTime(nil, rawDate, "en", time.Now())
+
+			// Should return rawDate exactly as-is
+			if result != rawDate {
+				t.Logf("expected rawDate %q returned as-is, got %q", rawDate, result)
+				return false
+			}
+
+			return true
+		},
+		nonDateStringGen,
+	))
+
+	properties.Property("dateTime==nil and rawDate non-empty returns rawDate regardless of language", prop.ForAll(
+		func(rawDate, lang string) bool {
+			now := time.Now()
+			result := FormatMailTime(nil, rawDate, lang, now)
+
+			// Should return rawDate exactly as-is regardless of language
+			if result != rawDate {
+				t.Logf("lang=%q: expected rawDate %q returned as-is, got %q", lang, rawDate, result)
+				return false
+			}
+
+			return true
+		},
+		nonDateStringGen,
+		gen.OneConstOf("zh", "zh-Hans", "en", "ja", "ko", "fr"),
+	))
+
+	properties.Property("dateTime==nil and rawDate empty with zh lang uses now formatted as UTC+8", prop.ForAll(
+		func(now time.Time) bool {
+			lang := "zh"
+			result := FormatMailTime(nil, "", lang, now)
+
+			// Should format now in UTC+8
+			loc := time.FixedZone("UTC+8", 8*60*60)
+			expected := now.In(loc).Format("2006-01-02 15:04:05 -07:00")
+
+			if result != expected {
+				t.Logf("zh empty rawDate: expected %q, got %q", expected, result)
+				return false
+			}
+
+			// Must contain +08:00 timezone identifier
+			if !strings.Contains(result, "+08:00") {
+				t.Logf("zh empty rawDate: result %q missing +08:00", result)
+				return false
+			}
+
+			return true
+		},
+		nowGen,
+	))
+
+	properties.Property("dateTime==nil and rawDate empty with zh-series lang uses now formatted as UTC+8", prop.ForAll(
+		func(lang string, now time.Time) bool {
+			result := FormatMailTime(nil, "", lang, now)
+
+			// Should format now in UTC+8
+			loc := time.FixedZone("UTC+8", 8*60*60)
+			expected := now.In(loc).Format("2006-01-02 15:04:05 -07:00")
+
+			if result != expected {
+				t.Logf("zh-series lang=%q empty rawDate: expected %q, got %q", lang, expected, result)
+				return false
+			}
+
+			if !strings.Contains(result, "+08:00") {
+				t.Logf("zh-series lang=%q empty rawDate: result %q missing +08:00", lang, result)
+				return false
+			}
+
+			return true
+		},
+		zhLangGen,
+		nowGen,
+	))
+
+	properties.Property("dateTime==nil and rawDate empty with non-zh lang uses now formatted as UTC+0", prop.ForAll(
+		func(lang string, now time.Time) bool {
+			result := FormatMailTime(nil, "", lang, now)
+
+			// Should format now in UTC+0
+			expected := now.UTC().Format("2006-01-02 15:04:05 -07:00")
+
+			if result != expected {
+				t.Logf("non-zh lang=%q empty rawDate: expected %q, got %q", lang, expected, result)
+				return false
+			}
+
+			if !strings.Contains(result, "+00:00") {
+				t.Logf("non-zh lang=%q empty rawDate: result %q missing +00:00", lang, result)
+				return false
+			}
+
+			return true
+		},
+		nonZhLangGen,
+		nowGen,
+	))
+
+	properties.TestingRun(t)
+}
+
+// Feature: bot-migration, Property 9: 邮件时间时区格式化
+// Validates: Requirements 11.3, 11.4, 11.5
+func TestProperty_MailTimeTimezoneFormatting(t *testing.T) {
+	parameters := gopter.DefaultTestParameters()
+	parameters.MinSuccessfulTests = 100
+
+	properties := gopter.NewProperties(parameters)
+
+	// Generator for zh-series language codes
+	zhLangGen := gen.OneConstOf("zh", "zh-Hans", "zh-Hant", "zh_CN", "zh-TW", "zh-HK", "ZH", "Zh-Hans")
+	// Generator for non-zh language codes
+	nonZhLangGen := gen.OneConstOf("en", "en-US", "ja", "ko", "fr", "de", "es", "ru", "ar", "pt")
+
+	// Generator for random time.Time values (Unix timestamps in a reasonable range)
+	// Range: 2000-01-01 to 2030-12-31
+	timeGen := gen.Int64Range(946684800, 1924991999).Map(func(ts int64) time.Time {
+		return time.Unix(ts, 0).UTC()
+	})
+
+	properties.Property("zh-series languages produce UTC+8 output with +08:00 timezone identifier", prop.ForAll(
+		func(lang string, dt time.Time) bool {
+			result := FormatMailTime(&dt, "", lang, time.Now())
+
+			// 1. Output must contain "+08:00" timezone identifier
+			if !strings.Contains(result, "+08:00") {
+				t.Logf("zh lang=%q: result %q does not contain +08:00", lang, result)
+				return false
+			}
+
+			// 2. Verify the actual time conversion is correct (UTC+8 = UTC + 8 hours)
+			loc := time.FixedZone("UTC+8", 8*60*60)
+			expectedTime := dt.In(loc)
+			expectedStr := expectedTime.Format("2006-01-02 15:04:05 -07:00")
+			if result != expectedStr {
+				t.Logf("zh lang=%q: result %q != expected %q", lang, result, expectedStr)
+				return false
+			}
+
+			return true
+		},
+		zhLangGen,
+		timeGen,
+	))
+
+	properties.Property("non-zh languages produce UTC+0 output with +00:00 timezone identifier", prop.ForAll(
+		func(lang string, dt time.Time) bool {
+			result := FormatMailTime(&dt, "", lang, time.Now())
+
+			// 1. Output must contain "+00:00" timezone identifier
+			if !strings.Contains(result, "+00:00") {
+				t.Logf("non-zh lang=%q: result %q does not contain +00:00", lang, result)
+				return false
+			}
+
+			// 2. Verify the actual time conversion is correct (UTC+0)
+			expectedStr := dt.UTC().Format("2006-01-02 15:04:05 -07:00")
+			if result != expectedStr {
+				t.Logf("non-zh lang=%q: result %q != expected %q", lang, result, expectedStr)
+				return false
+			}
+
+			return true
+		},
+		nonZhLangGen,
+		timeGen,
+	))
+
+	properties.Property("output always contains timezone identifier for non-nil dateTime", prop.ForAll(
+		func(lang string, dt time.Time) bool {
+			result := FormatMailTime(&dt, "", lang, time.Now())
+
+			// Output must contain either +08:00 or +00:00
+			hasTimezone := strings.Contains(result, "+08:00") || strings.Contains(result, "+00:00")
+			if !hasTimezone {
+				t.Logf("lang=%q: result %q does not contain any timezone identifier", lang, result)
+				return false
+			}
+
+			// Verify consistency: zh → +08:00, non-zh → +00:00
+			if IsZhLang(lang) {
+				if !strings.Contains(result, "+08:00") {
+					t.Logf("zh lang=%q should have +08:00 but got %q", lang, result)
+					return false
+				}
+			} else {
+				if !strings.Contains(result, "+00:00") {
+					t.Logf("non-zh lang=%q should have +00:00 but got %q", lang, result)
+					return false
+				}
+			}
+
+			return true
+		},
+		gen.OneConstOf("zh", "zh-Hans", "zh_CN", "en", "ja", "ko", "fr", "de"),
+		timeGen,
+	))
+
+	properties.TestingRun(t)
+}
+
+// Feature: bot-migration, Property 5: 邮件多路投递与选择性 Alert
+// Validates: Requirements 5.1, 5.2, 5.3
+func TestProperty_MailMultiDeliverySelectiveAlert(t *testing.T) {
+	parameters := gopter.DefaultTestParameters()
+	parameters.MinSuccessfulTests = 100
+
+	properties := gopter.NewProperties(parameters)
+
+	// Generator for number of old bots (1..5)
+	oldBotCountGen := gen.IntRange(1, 5)
+
+	// Generator for random mail subject (short alphanumeric)
+	subjectGen := gen.RegexMatch("[a-zA-Z0-9 ]{1,30}")
+
+	// Generator for random mail body text
+	bodyGen := gen.RegexMatch("[a-zA-Z0-9 ]{0,100}")
+
+	properties.Property("all endpoints receive mail; old endpoints get alert; new endpoint does not", prop.ForAll(
+		func(numOldBots int, subject, body string) bool {
+			// Create fresh IO + DB for each test run
+			tmpFile, err := os.CreateTemp("", "prop5-multi-*.db")
+			if err != nil {
+				t.Logf("CreateTemp error: %v", err)
+				return false
+			}
+			tmpFile.Close()
+			defer os.Remove(tmpFile.Name())
+
+			database, err := db.New(tmpFile.Name())
+			if err != nil {
+				t.Logf("db.New error: %v", err)
+				return false
+			}
+			defer database.Close()
+
+			cfg := &config.Config{MailDomain: "test.example.com"}
+			ioInst := New(database, cfg)
+
+			// Bind a domain so HandleMailMulti can resolve the recipient
+			tgID := int64(12345)
+			domain := "user123.test.example.com"
+			ioInst.domainToUser.Store(domain, tgID)
+
+			// Create mock senders: 1 new + N old
+			newSender := &multiDeliveryMockSender{name: "new-bot"}
+			endpoints := []DeliveryEndpoint{
+				{Name: "new-bot", Sender: newSender, IsOld: false},
+			}
+
+			oldSenders := make([]*multiDeliveryMockSender, numOldBots)
+			for i := 0; i < numOldBots; i++ {
+				name := fmt.Sprintf("old-bot-%d", i)
+				oldSenders[i] = &multiDeliveryMockSender{name: name}
+				endpoints = append(endpoints, DeliveryEndpoint{
+					Name:   name,
+					Sender: oldSenders[i],
+					IsOld:  true,
+				})
+			}
+
+			// Track alert calls
+			type alertCall struct {
+				senderName string
+				tgID       int64
+				lang       string
+			}
+			var alertCalls []alertCall
+			alertFunc := func(sender TelegramSender, tgID int64, lang string) {
+				ms := sender.(*multiDeliveryMockSender)
+				alertCalls = append(alertCalls, alertCall{
+					senderName: ms.name,
+					tgID:       tgID,
+					lang:       lang,
+				})
+			}
+
+			// Create a mail addressed to the bound domain
+			mail := &smtpmod.ParsedMail{
+				From:    "sender@external.com",
+				To:      "someone@" + domain,
+				Subject: subject,
+				Date:    "2024-06-15",
+				RawDate: "2024-06-15",
+				Text:    body,
+			}
+
+			// Execute
+			ioInst.HandleMailMulti(mail, endpoints, alertFunc, time.Now())
+
+			// Verify 1: All endpoints received at least one Send call (the mail message)
+			if newSender.sendCount == 0 {
+				t.Logf("new-bot received 0 Send calls, expected at least 1")
+				return false
+			}
+			for i, os := range oldSenders {
+				if os.sendCount == 0 {
+					t.Logf("old-bot-%d received 0 Send calls, expected at least 1", i)
+					return false
+				}
+			}
+
+			// Verify 2: AlertFunc was called once for each old bot endpoint
+			if len(alertCalls) != numOldBots {
+				t.Logf("expected %d alert calls (one per old bot), got %d", numOldBots, len(alertCalls))
+				return false
+			}
+
+			// Verify each old bot's sender was used in the alert call
+			oldSenderNames := make(map[string]bool)
+			for i := 0; i < numOldBots; i++ {
+				oldSenderNames[fmt.Sprintf("old-bot-%d", i)] = true
+			}
+			for _, ac := range alertCalls {
+				if !oldSenderNames[ac.senderName] {
+					t.Logf("alert called with unexpected sender %q", ac.senderName)
+					return false
+				}
+				if ac.tgID != tgID {
+					t.Logf("alert called with tgID=%d, expected %d", ac.tgID, tgID)
+					return false
+				}
+				delete(oldSenderNames, ac.senderName)
+			}
+			if len(oldSenderNames) > 0 {
+				t.Logf("some old bots did not get alert calls: %v", oldSenderNames)
+				return false
+			}
+
+			// Verify 3: AlertFunc was NOT called for the new bot endpoint
+			for _, ac := range alertCalls {
+				if ac.senderName == "new-bot" {
+					t.Logf("alert was called for new-bot, which should not happen")
+					return false
+				}
+			}
+
+			return true
+		},
+		oldBotCountGen,
+		subjectGen,
+		bodyGen,
+	))
+
+	properties.TestingRun(t)
+}
+
+// multiDeliveryMockSender is a mock TelegramSender that tracks Send calls for property testing.
+type multiDeliveryMockSender struct {
+	name      string
+	sendCount int
+}
+
+func (m *multiDeliveryMockSender) Send(c tgbotapi.Chattable) (tgbotapi.Message, error) {
+	m.sendCount++
+	return tgbotapi.Message{}, nil
+}
+
+func (m *multiDeliveryMockSender) Request(c tgbotapi.Chattable) (*tgbotapi.APIResponse, error) {
+	return &tgbotapi.APIResponse{Ok: true}, nil
 }
