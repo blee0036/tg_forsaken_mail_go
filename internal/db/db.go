@@ -4,6 +4,9 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"strings"
+	"sync"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -34,7 +37,12 @@ type BlockReceiver struct {
 
 // DB wraps a *sql.DB for SQLite operations.
 type DB struct {
-	db *sql.DB
+	db                *sql.DB
+	checkpointEnabled bool
+	checkpointStop    chan struct{}
+	checkpointDone    chan struct{}
+	closeOnce         sync.Once
+	closeErr          error
 }
 
 // New opens the SQLite database at dbPath, auto-detects and creates
@@ -46,26 +54,88 @@ func New(dbPath string) (*DB, error) {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
-	if _, err := sqlDB.Exec("PRAGMA journal_mode=WAL"); err != nil {
+	var journalMode string
+	if err := sqlDB.QueryRow("PRAGMA journal_mode=WAL").Scan(&journalMode); err != nil {
 		sqlDB.Close()
 		return nil, fmt.Errorf("failed to set journal_mode=WAL: %w", err)
+	}
+	checkpointEnabled := strings.EqualFold(journalMode, "wal")
+	if !checkpointEnabled && dbPath != ":memory:" {
+		log.Printf("WARNING: SQLite journal_mode is %q; WAL checkpointing is disabled.", journalMode)
 	}
 	if _, err := sqlDB.Exec("PRAGMA busy_timeout=5000"); err != nil {
 		sqlDB.Close()
 		return nil, fmt.Errorf("failed to set busy_timeout: %w", err)
 	}
 
-	d := &DB{db: sqlDB}
+	d := &DB{
+		db:                sqlDB,
+		checkpointEnabled: checkpointEnabled,
+		checkpointStop:    make(chan struct{}),
+		checkpointDone:    make(chan struct{}),
+	}
 	if err := d.initTables(); err != nil {
 		sqlDB.Close()
 		return nil, fmt.Errorf("failed to initialize tables: %w", err)
 	}
+	d.startPeriodicCheckpoint(time.Minute)
 	return d, nil
+}
+
+// Checkpoint flushes WAL frames into the main database file and truncates the WAL.
+func (d *DB) Checkpoint() error {
+	if !d.checkpointEnabled {
+		return nil
+	}
+
+	var busy, logFrames, checkpointedFrames int
+	if err := d.db.QueryRow("PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &logFrames, &checkpointedFrames); err != nil {
+		return fmt.Errorf("wal checkpoint: %w", err)
+	}
+	if busy != 0 {
+		return fmt.Errorf("wal checkpoint busy: %d of %d frame(s) checkpointed", checkpointedFrames, logFrames)
+	}
+	return nil
+}
+
+func (d *DB) startPeriodicCheckpoint(interval time.Duration) {
+	if !d.checkpointEnabled {
+		close(d.checkpointDone)
+		return
+	}
+
+	ticker := time.NewTicker(interval)
+	go func() {
+		defer close(d.checkpointDone)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				if err := d.Checkpoint(); err != nil {
+					log.Printf("WARNING: SQLite WAL checkpoint failed: %v", err)
+				}
+			case <-d.checkpointStop:
+				return
+			}
+		}
+	}()
 }
 
 // Close closes the underlying database connection.
 func (d *DB) Close() error {
-	return d.db.Close()
+	d.closeOnce.Do(func() {
+		close(d.checkpointStop)
+		<-d.checkpointDone
+
+		if err := d.Checkpoint(); err != nil {
+			d.closeErr = err
+		}
+		if err := d.db.Close(); err != nil && d.closeErr == nil {
+			d.closeErr = err
+		}
+	})
+	return d.closeErr
 }
 
 // initTables checks for and creates missing tables, matching Node.js db.js exactly.

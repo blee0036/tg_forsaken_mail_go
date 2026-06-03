@@ -201,6 +201,35 @@ func TestStartupFlowDeferDatabaseClose(t *testing.T) {
 	}
 }
 
+// TestStartupFlowSignalShutdownClosesDatabase verifies SIGINT/SIGTERM trigger
+// graceful shutdown so SQLite WAL data is checkpointed before container exit.
+func TestStartupFlowSignalShutdownClosesDatabase(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("Failed to read main.go: %v", err)
+	}
+	source := string(src)
+
+	signalIdx := strings.Index(source, "signal.Notify(")
+	if signalIdx == -1 {
+		t.Fatal("main.go should register signal handling")
+	}
+	afterSignal := source[signalIdx:]
+
+	requiredPatterns := []string{
+		"os.Interrupt",
+		"syscall.SIGTERM",
+		"bot.Stop()",
+		"database.Close()",
+		"os.Exit(0)",
+	}
+	for _, pattern := range requiredPatterns {
+		if !strings.Contains(afterSignal, pattern) {
+			t.Errorf("signal shutdown path should contain %q", pattern)
+		}
+	}
+}
+
 // TestStartupFlowSMTPInGoroutine verifies SMTP server runs in a goroutine.
 func TestStartupFlowSMTPInGoroutine(t *testing.T) {
 	src, err := os.ReadFile("main.go")

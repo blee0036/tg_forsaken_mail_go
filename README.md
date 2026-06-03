@@ -76,6 +76,10 @@ docker run -d \
   ghcr.io/blee0036/tg_forsaken_main_go:latest
 ```
 
+> SQLite uses WAL mode for read-heavy workloads. The app checkpoints WAL into `mail.db` every minute and on SIGINT/SIGTERM (for example `docker stop`). If the container is force-killed or the host loses power, data written since the last checkpoint may still be in `mail.db-wal`; mounting the whole data directory is still the strongest durability option.
+>
+> SQLite 使用 WAL 模式以优化多读场景。程序会每分钟 checkpoint 一次，并在 SIGINT/SIGTERM（例如 `docker stop`）时把 WAL 刷回 `mail.db`。如果容器被强杀或主机断电，最近一次 checkpoint 之后的数据仍可能只在 `mail.db-wal` 中；完整挂载数据目录仍是最强持久化方案。
+
 ### 2. Build Docker Locally / 本地构建 Docker
 
 ```bash

@@ -5,6 +5,8 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"go-version-rewrite/internal/config"
@@ -93,6 +95,23 @@ func main() {
 		smtpServer.OnMessage(ioModule.HandleMail)
 		log.Println("Mail handler registered")
 	}
+
+	// Flush the SQLite WAL before container shutdown when Docker sends SIGTERM.
+	signalCh := make(chan os.Signal, 1)
+	signal.Notify(signalCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(signalCh)
+	go func() {
+		sig := <-signalCh
+		log.Printf("Received %s, shutting down...", sig)
+		if migrationManager != nil {
+			migrationManager.Stop()
+		}
+		bot.Stop()
+		if err := database.Close(); err != nil {
+			log.Printf("Failed to close database during shutdown: %v", err)
+		}
+		os.Exit(0)
+	}()
 
 	// 9. Start SMTP server in goroutine
 	go func() {

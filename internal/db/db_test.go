@@ -1,6 +1,9 @@
 package db
 
 import (
+	"database/sql"
+	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -71,6 +74,94 @@ func TestClose(t *testing.T) {
 	}
 	if err := d.Close(); err != nil {
 		t.Errorf("Close() failed: %v", err)
+	}
+}
+
+func TestCheckpointFlushesWALToMainDatabaseFile(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	d, err := New(dbPath)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer d.Close()
+
+	for i := 0; i < 3; i++ {
+		if _, err := d.InsertDomain(fmt.Sprintf("checkpoint-%d.example.com", i), int64(i)); err != nil {
+			t.Fatalf("InsertDomain() failed: %v", err)
+		}
+	}
+
+	if err := d.Checkpoint(); err != nil {
+		t.Fatalf("Checkpoint() failed: %v", err)
+	}
+
+	assertMainDBDomainCount(t, dbPath, 3)
+	assertWALTruncated(t, dbPath)
+}
+
+func TestCloseCheckpointsAndIsIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	d, err := New(dbPath)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+
+	if _, err := d.InsertDomain("close-checkpoint.example.com", 42); err != nil {
+		t.Fatalf("InsertDomain() failed: %v", err)
+	}
+
+	if err := d.Close(); err != nil {
+		t.Fatalf("Close() failed: %v", err)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatalf("second Close() failed: %v", err)
+	}
+
+	assertMainDBDomainCount(t, dbPath, 1)
+	assertWALTruncated(t, dbPath)
+}
+
+func assertMainDBDomainCount(t *testing.T, dbPath string, expected int) {
+	t.Helper()
+
+	copiedPath := filepath.Join(t.TempDir(), "main-only.db")
+	data, err := os.ReadFile(dbPath)
+	if err != nil {
+		t.Fatalf("failed to read main database file: %v", err)
+	}
+	if err := os.WriteFile(copiedPath, data, 0o600); err != nil {
+		t.Fatalf("failed to copy main database file: %v", err)
+	}
+
+	copiedDB, err := sql.Open("sqlite", copiedPath)
+	if err != nil {
+		t.Fatalf("failed to open copied main database file: %v", err)
+	}
+	defer copiedDB.Close()
+
+	var count int
+	if err := copiedDB.QueryRow("SELECT COUNT(*) FROM domain_tg").Scan(&count); err != nil {
+		t.Fatalf("failed to query copied main database file: %v", err)
+	}
+	if count != expected {
+		t.Fatalf("expected %d copied main database row(s), got %d", expected, count)
+	}
+}
+
+func assertWALTruncated(t *testing.T, dbPath string) {
+	t.Helper()
+
+	info, err := os.Stat(dbPath + "-wal")
+	if os.IsNotExist(err) {
+		return
+	}
+	if err != nil {
+		t.Fatalf("failed to stat WAL file: %v", err)
+	}
+	if info.Size() != 0 {
+		t.Fatalf("expected WAL file to be truncated, got %d byte(s)", info.Size())
 	}
 }
 
@@ -316,5 +407,3 @@ func TestSchemaMatchesNodeVersion(t *testing.T) {
 		t.Fatalf("failed to get block_receiver index: %v", err)
 	}
 }
-
-

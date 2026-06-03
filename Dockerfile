@@ -12,4 +12,5 @@ WORKDIR /app
 COPY --from=builder /build/bot .
 COPY --from=builder /build/config-simple.json .
 EXPOSE 25
+STOPSIGNAL SIGTERM
 CMD ["./bot"]
