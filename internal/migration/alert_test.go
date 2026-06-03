@@ -141,10 +141,10 @@ func TestResolveAlertMessage_EmptyMap(t *testing.T) {
 	}
 }
 
-func TestSendAlert_MarkdownSuccess(t *testing.T) {
+func TestSendAlert_RawTextPreservesUsernameUnderscores(t *testing.T) {
 	cfg := &config.Config{
 		ChangeBotAlertMsg: map[string]string{
-			"en": "Switch to *new bot*",
+			"en": "Please switch to @qwert_mail_bot for uninterrupted mail forwarding.",
 		},
 	}
 	a := NewAlertSender(cfg)
@@ -155,41 +155,33 @@ func TestSendAlert_MarkdownSuccess(t *testing.T) {
 	if len(sender.sentMessages) != 1 {
 		t.Fatalf("expected 1 message sent, got %d", len(sender.sentMessages))
 	}
-}
 
-func TestSendAlert_MarkdownFailsPlainTextSucceeds(t *testing.T) {
-	cfg := &config.Config{
-		ChangeBotAlertMsg: map[string]string{
-			"en": "Switch to *new bot*",
-		},
+	msgCfg, ok := sender.sentMessages[0].(tgbotapi.MessageConfig)
+	if !ok {
+		t.Fatalf("expected tgbotapi.MessageConfig, got %T", sender.sentMessages[0])
 	}
-	a := NewAlertSender(cfg)
-	sender := &mockSender{failCount: 1} // First call fails, second succeeds
-
-	a.SendAlert(sender, 12345, "en")
-
-	if sender.callCount != 2 {
-		t.Fatalf("expected 2 send attempts, got %d", sender.callCount)
+	if msgCfg.ParseMode != "" {
+		t.Fatalf("expected raw text with empty ParseMode, got %q", msgCfg.ParseMode)
 	}
-	if len(sender.sentMessages) != 1 {
-		t.Fatalf("expected 1 message sent (plain text retry), got %d", len(sender.sentMessages))
+	if msgCfg.Text != cfg.ChangeBotAlertMsg["en"] {
+		t.Fatalf("expected alert text to be preserved, got %q", msgCfg.Text)
 	}
 }
 
-func TestSendAlert_BothFail(t *testing.T) {
+func TestSendAlert_SendFailureDoesNotRetry(t *testing.T) {
 	cfg := &config.Config{
 		ChangeBotAlertMsg: map[string]string{
-			"en": "Switch to *new bot*",
+			"en": "Switch to @qwert_mail_bot",
 		},
 	}
 	a := NewAlertSender(cfg)
-	sender := &mockSender{failCount: 2} // Both calls fail
+	sender := &mockSender{failCount: 1}
 
 	// Should not panic, just log errors
 	a.SendAlert(sender, 12345, "en")
 
-	if sender.callCount != 2 {
-		t.Fatalf("expected 2 send attempts, got %d", sender.callCount)
+	if sender.callCount != 1 {
+		t.Fatalf("expected 1 send attempt, got %d", sender.callCount)
 	}
 	if len(sender.sentMessages) != 0 {
 		t.Fatalf("expected 0 messages sent, got %d", len(sender.sentMessages))

@@ -163,8 +163,8 @@ cp config-changebot-simple.json config.json
     "YOUR_OLD_BOT_TOKEN_2"
   ],
   "change_bot_alert_msg": {
-    "en": "⚠️ This bot will be discontinued soon. Please switch to @YourNewBot for uninterrupted mail forwarding.",
-    "zh": "⚠️ 此 Bot 即将停用，请尽快切换到 @YourNewBot 以继续接收邮件转发服务。"
+    "en": "⚠️ This bot will be discontinued soon. Please switch to @your_new_bot for uninterrupted mail forwarding.",
+    "zh": "⚠️ 此 Bot 即将停用，请尽快切换到 @your_new_bot 以继续接收邮件转发服务。"
   },
   "close_old_date": "2025-12-31"
 }
@@ -173,7 +173,7 @@ cp config-changebot-simple.json config.json
 | Field | Required | Description / 说明 |
 |-------|----------|-------------------|
 | `old_telegram_bot_token` | No | Array of old Bot tokens to migrate from. Empty strings, duplicates, and tokens matching the main `telegram_bot_token` are automatically filtered. / 旧 Bot Token 数组。空字符串、重复项和与主 Token 相同的条目会被自动过滤。 |
-| `change_bot_alert_msg` | No | Map of language code → migration alert message (supports Markdown). At least `"en"` and `"zh"` recommended. Entries with blank keys or values are ignored. / 语言代码→迁移提醒消息的映射（支持 Markdown）。建议至少配置 `"en"` 和 `"zh"`。空白 key 或 value 的条目会被忽略。 |
+| `change_bot_alert_msg` | No | Map of language code → migration alert message, sent as plain text. At least `"en"` and `"zh"` recommended. Entries with blank keys or values are ignored. / 语言代码→迁移提醒消息的映射，以纯文本发送。建议至少配置 `"en"` 和 `"zh"`。空白 key 或 value 的条目会被忽略。 |
 | `close_old_date` | No | Date (`YYYY-MM-DD`) after which old Bots stop delivering emails and daily alerts. Interactions still trigger alerts. Invalid format causes startup failure. / 旧 Bot 停止投递邮件和每日推送的截止日期。到期后交互仍会触发提醒。格式不合法会导致启动失败。 |
 
 ### How It Works / 使用流程
@@ -186,9 +186,9 @@ cp config-changebot-simple.json config.json
 
    将旧 Bot Token 移入 `old_telegram_bot_token` 数组。
 
-3. **Configure alert messages** in `change_bot_alert_msg` with your preferred languages. Messages support Markdown formatting. Language fallback order: exact match → prefix normalization (e.g. `zh-Hans` → `zh`) → `"en"` → `"zh"` → first key alphabetically.
+3. **Configure alert messages** in `change_bot_alert_msg` with your preferred languages. Messages are sent as plain text so bot usernames such as `@your_new_bot` are preserved. Language fallback order: exact match → prefix normalization (e.g. `zh-Hans` → `zh`) → `"en"` → `"zh"` → first key alphabetically.
 
-   在 `change_bot_alert_msg` 中配置各语言的迁移提醒消息，支持 Markdown 格式。语言回退顺序：精确匹配 → 前缀归一化（如 `zh-Hans` → `zh`）→ `"en"` → `"zh"` → 按 key 字典序第一个。
+   在 `change_bot_alert_msg` 中配置各语言的迁移提醒消息，消息会以纯文本发送，因此 `@your_new_bot` 这类带下划线的 Bot 用户名会被原样保留。语言回退顺序：精确匹配 → 前缀归一化（如 `zh-Hans` → `zh`）→ `"en"` → `"zh"` → 按 key 字典序第一个。
 
 4. **Optionally set `close_old_date`** to a future date. After this date, old Bots will stop delivering emails and daily push alerts, but will still send migration alerts when users interact with them.
 
@@ -210,7 +210,7 @@ cp config-changebot-simple.json config.json
 - All migration fields are **optional**. Without them, the system runs exactly as before. / 所有迁移字段均为**可选**，不配置时系统行为与之前完全一致。
 - All Bots (new and old) share the same database and user bindings. / 所有 Bot（新旧）共享同一数据库和用户绑定关系。
 - If an old Bot token is invalid, it is skipped with a log warning; other Bots start normally. / 旧 Bot Token 无效时跳过并记录日志，不影响其他 Bot 启动。
-- Alert send failures are handled gracefully (Markdown → plain text retry → log and continue). / Alert 发送失败时优雅处理（Markdown → 纯文本重试 → 记录日志并继续）。
+- Alert send failures are handled gracefully (log and continue). / Alert 发送失败时优雅处理（记录日志并继续）。
 - See `config-changebot-simple.json` for a complete example configuration. / 完整配置示例请参考 `config-changebot-simple.json`。
 
 ---

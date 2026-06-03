@@ -63,27 +63,16 @@ func (a *AlertSender) ResolveAlertMessage(lang string) string {
 }
 
 // SendAlert sends the migration alert via the given sender to the specified user.
-// Uses Markdown parse mode first; on failure, retries with plain text; on second failure, logs the error.
+// It intentionally uses raw text so Telegram usernames with underscores are preserved.
 func (a *AlertSender) SendAlert(sender io.TelegramSender, tgID int64, lang string) {
 	msg := a.ResolveAlertMessage(lang)
 	if msg == "" {
 		return
 	}
 
-	// Try Markdown mode first
-	mdMsg := tgbotapi.NewMessage(tgID, msg)
-	mdMsg.ParseMode = tgbotapi.ModeMarkdown
-	_, err := sender.Send(mdMsg)
-	if err == nil {
-		return
-	}
-	log.Printf("[migration] alert markdown send failed for tgID=%d: %v, retrying as plain text", tgID, err)
-
-	// Retry with plain text (no parse mode)
 	plainMsg := tgbotapi.NewMessage(tgID, msg)
-	_, err = sender.Send(plainMsg)
-	if err != nil {
-		log.Printf("[migration] alert plain text send also failed for tgID=%d: %v", tgID, err)
+	if _, err := sender.Send(plainMsg); err != nil {
+		log.Printf("[migration] alert send failed for tgID=%d: %v", tgID, err)
 	}
 }
 

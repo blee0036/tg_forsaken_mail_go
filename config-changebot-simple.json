@@ -14,8 +14,8 @@
     "YOUR_OLD_BOT_TOKEN_2"
   ],
   "change_bot_alert_msg": {
-    "en": "⚠️ This bot will be discontinued soon. Please switch to @YourNewBot for uninterrupted mail forwarding.",
-    "zh": "⚠️ 此 Bot 即将停用，请尽快切换到 @YourNewBot 以继续接收邮件转发服务。"
+    "en": "⚠️ This bot will be discontinued soon. Please switch to @your_new_bot for uninterrupted mail forwarding.",
+    "zh": "⚠️ 此 Bot 即将停用，请尽快切换到 @your_new_bot 以继续接收邮件转发服务。"
   },
   "close_old_date": "2025-12-31"
 }
