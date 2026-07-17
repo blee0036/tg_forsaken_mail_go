@@ -140,6 +140,75 @@ func TestBindDomain(t *testing.T) {
 	}
 }
 
+func TestBindDomainCanonicalizesDNSName(t *testing.T) {
+	ioModule, database := newTestIO(t)
+
+	if got := ioModule.BindDomain(100, "Example.COM."); got != "Bind Success!" {
+		t.Fatalf("BindDomain() = %q", got)
+	}
+	if value, ok := ioModule.domainToUser.Load("example.com"); !ok || value.(int64) != 100 {
+		t.Fatalf("canonical domain mapping = %v, %v", value, ok)
+	}
+	if _, ok := ioModule.domainToUser.Load("Example.COM."); ok {
+		t.Fatal("non-canonical domain key was retained")
+	}
+	if got := ioModule.BindDomain(200, "EXAMPLE.com"); got != "This domain has already bind on another account!" {
+		t.Fatalf("case-variant BindDomain() = %q", got)
+	}
+
+	records, err := database.SelectAllDomain()
+	if err != nil {
+		t.Fatalf("SelectAllDomain() error: %v", err)
+	}
+	if len(records) != 1 || records[0].Domain != "example.com" {
+		t.Fatalf("stored domains = %#v", records)
+	}
+}
+
+func TestInitRefusesConflictingCaseInsensitiveDomainBindings(t *testing.T) {
+	ioModule, database := newTestIO(t)
+	if _, err := database.InsertDomain("Example.com", 100); err != nil {
+		t.Fatalf("InsertDomain(first) error: %v", err)
+	}
+	if _, err := database.InsertDomain("example.COM", 200); err != nil {
+		t.Fatalf("InsertDomain(second) error: %v", err)
+	}
+
+	if err := ioModule.Init(); err != nil {
+		t.Fatalf("Init() error: %v", err)
+	}
+	if _, ok := ioModule.domainToUser.Load("example.com"); ok {
+		t.Fatal("conflicting domain must not be routed to either user")
+	}
+	if _, ok := ioModule.domainConflict.Load("example.com"); !ok {
+		t.Fatal("conflicting domain was not recorded")
+	}
+	if got := ioModule.BindDomain(300, "EXAMPLE.COM"); got != "This domain has conflicting bindings in the database!" {
+		t.Fatalf("BindDomain(conflict) = %q", got)
+	}
+}
+
+func TestRemoveDomainHandlesLegacyMixedCaseRecord(t *testing.T) {
+	ioModule, database := newTestIO(t)
+	if _, err := database.InsertDomain("Legacy.Example", 100); err != nil {
+		t.Fatalf("InsertDomain() error: %v", err)
+	}
+	if err := ioModule.Init(); err != nil {
+		t.Fatalf("Init() error: %v", err)
+	}
+
+	if got := ioModule.RemoveDomain(100, "legacy.example"); got != "Release Success!" {
+		t.Fatalf("RemoveDomain() = %q", got)
+	}
+	records, err := database.SelectAllDomain()
+	if err != nil {
+		t.Fatalf("SelectAllDomain() error: %v", err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("legacy domain records remain: %#v", records)
+	}
+}
+
 func TestRemoveDomain(t *testing.T) {
 	io, _ := newTestIO(t)
 
@@ -453,6 +522,37 @@ func TestBlockReceiver(t *testing.T) {
 	}
 }
 
+func TestBlockIdentitiesAreCanonicalized(t *testing.T) {
+	ioModule, _ := newTestIO(t)
+
+	ioModule.BlockSender(100, " Sender@Example.COM ")
+	ioModule.BlockDomain(100, " Example.COM. ")
+	ioModule.BlockReceiver(100, " User@Recipient.COM ")
+
+	senders, _ := ioModule.db.SelectUserAllBlockSender(100)
+	domains, _ := ioModule.db.SelectUserAllBlockDomain(100)
+	receivers, _ := ioModule.db.SelectUserAllBlockReceiver(100)
+	if len(senders) != 1 || senders[0].Sender != "sender@example.com" {
+		t.Fatalf("canonical senders = %#v", senders)
+	}
+	if len(domains) != 1 || domains[0].Domain != "example.com" {
+		t.Fatalf("canonical domains = %#v", domains)
+	}
+	if len(receivers) != 1 || receivers[0].Receiver != "user@recipient.com" {
+		t.Fatalf("canonical receivers = %#v", receivers)
+	}
+
+	ioModule.RemoveBlockSender(100, "SENDER@EXAMPLE.COM")
+	ioModule.RemoveBlockDomain(100, "EXAMPLE.COM.")
+	ioModule.RemoveBlockReceiver(100, "USER@RECIPIENT.COM")
+	senders, _ = ioModule.db.SelectUserAllBlockSender(100)
+	domains, _ = ioModule.db.SelectUserAllBlockDomain(100)
+	receivers, _ = ioModule.db.SelectUserAllBlockReceiver(100)
+	if len(senders) != 0 || len(domains) != 0 || len(receivers) != 0 {
+		t.Fatalf("case-insensitive unblock left records: senders=%#v domains=%#v receivers=%#v", senders, domains, receivers)
+	}
+}
+
 func TestRemoveBlockSender(t *testing.T) {
 	io, _ := newTestIO(t)
 
@@ -681,17 +781,18 @@ func TestSendAll_NoBot(t *testing.T) {
 	io.SendAll("test message")
 }
 
-
 // --- HandleMail tests ---
 
 func newTestParsedMail() *smtpmod.ParsedMail {
 	return &smtpmod.ParsedMail{
-		From:    "sender@example.com",
-		To:      "user@bound.com",
-		Subject: "Test Subject",
-		Date:    "2024-01-15 10:30:00",
-		Text:    "Hello, this is a test email.",
-		HTML:    "",
+		From:               "sender@example.com",
+		To:                 "user@bound.com",
+		EnvelopeFrom:       "sender@example.com",
+		EnvelopeRecipients: []string{"user@bound.com"},
+		Subject:            "Test Subject",
+		Date:               "2024-01-15 10:30:00",
+		Text:               "Hello, this is a test email.",
+		HTML:               "",
 	}
 }
 
@@ -699,7 +800,7 @@ func TestHandleMail_NoDomainMatch(t *testing.T) {
 	io, _ := newTestIO(t)
 
 	mail := newTestParsedMail()
-	mail.To = "user@unknown.com"
+	mail.EnvelopeRecipients = []string{"user@unknown.com"}
 
 	// Should not panic, just return silently
 	io.HandleMail(mail)
@@ -709,7 +810,7 @@ func TestHandleMail_InvalidToAddress(t *testing.T) {
 	io, _ := newTestIO(t)
 
 	mail := newTestParsedMail()
-	mail.To = "not-an-email"
+	mail.EnvelopeRecipients = []string{"not-an-email"}
 
 	// Should not panic
 	io.HandleMail(mail)
@@ -758,6 +859,7 @@ func TestHandleMail_MessageFormat(t *testing.T) {
 	m := &smtpmod.ParsedMail{
 		From:    "alice@sender.com",
 		To:      "bob@receiver.com",
+		Cc:      "copy@receiver.com",
 		Subject: "Hello World",
 		Date:    "2024-01-15 10:30:00",
 		Text:    "This is the body.",
@@ -772,6 +874,9 @@ func TestHandleMail_MessageFormat(t *testing.T) {
 	if !strings.Contains(result, "*To:*") {
 		t.Errorf("missing *To:* in result: %q", result)
 	}
+	if !strings.Contains(result, "*Cc:*") {
+		t.Errorf("missing *Cc:* in result: %q", result)
+	}
 	if !strings.Contains(result, "*Subject:*") {
 		t.Errorf("missing *Subject:* in result: %q", result)
 	}
@@ -784,6 +889,9 @@ func TestHandleMail_MessageFormat(t *testing.T) {
 	}
 	if !strings.Contains(result, "bob@receiver") {
 		t.Errorf("missing to value in result: %q", result)
+	}
+	if !strings.Contains(result, "copy@receiver") {
+		t.Errorf("missing cc value in result: %q", result)
 	}
 	if !strings.Contains(result, "Hello World") {
 		t.Errorf("missing subject value in result: %q", result)

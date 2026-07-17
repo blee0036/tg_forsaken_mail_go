@@ -227,7 +227,7 @@ func (d *DB) tableExists(name string) bool {
 // SelectByDomain returns all domain_tg records matching the given domain.
 // SQL: SELECT * FROM domain_tg WHERE domain IS $origin
 func (d *DB) SelectByDomain(domain string) ([]DomainTg, error) {
-	rows, err := d.db.Query("SELECT * FROM domain_tg WHERE domain IS ?", domain)
+	rows, err := d.db.Query("SELECT * FROM domain_tg WHERE domain = ? COLLATE NOCASE", domain)
 	if err != nil {
 		return nil, err
 	}
@@ -259,7 +259,7 @@ func (d *DB) InsertDomain(domain string, tg int64) ([]DomainTg, error) {
 // SQL: DELETE FROM domain_tg WHERE domain IS $domain
 // Then returns selectByDomain(domain).
 func (d *DB) DeleteDomain(domain string) ([]DomainTg, error) {
-	_, err := d.db.Exec("DELETE FROM domain_tg WHERE domain IS ?", domain)
+	_, err := d.db.Exec("DELETE FROM domain_tg WHERE domain = ? COLLATE NOCASE", domain)
 	if err != nil {
 		return nil, err
 	}
@@ -323,7 +323,7 @@ func (d *DB) InsertBlockDomain(domain string, tg int64) ([]BlockDomain, error) {
 // SQL: DELETE FROM block_domain WHERE domain IS $domain AND tg IS $tg
 // Then returns selectByBlockDomain(domain, tg).
 func (d *DB) DeleteBlockDomain(domain string, tg int64) ([]BlockDomain, error) {
-	_, err := d.db.Exec("DELETE FROM block_domain WHERE domain IS ? AND tg IS ?", domain, tg)
+	_, err := d.db.Exec("DELETE FROM block_domain WHERE domain = ? COLLATE NOCASE AND tg IS ?", domain, tg)
 	if err != nil {
 		return nil, err
 	}
@@ -412,7 +412,7 @@ func (d *DB) InsertBlockSender(sender string, tg int64) ([]BlockSender, error) {
 // Note: Node.js version calls selectByBlockSender(sender) with only sender arg
 // (tg is undefined → NULL), so this replicates that behavior.
 func (d *DB) DeleteBlockSender(sender string, tg int64) ([]BlockSender, error) {
-	_, err := d.db.Exec("DELETE FROM block_sender WHERE sender IS ? AND tg IS ?", sender, tg)
+	_, err := d.db.Exec("DELETE FROM block_sender WHERE sender = ? COLLATE NOCASE AND tg IS ?", sender, tg)
 	if err != nil {
 		return nil, err
 	}
@@ -502,7 +502,7 @@ func (d *DB) InsertBlockReceiver(receiver string, tg int64) ([]BlockReceiver, er
 // Note: Node.js version calls selectByBlockReceiver(receiver) with only receiver arg
 // (tg is undefined → NULL), so this replicates that behavior.
 func (d *DB) DeleteBlockReceiver(receiver string, tg int64) ([]BlockReceiver, error) {
-	_, err := d.db.Exec("DELETE FROM block_receiver WHERE receiver IS ? AND tg IS ?", receiver, tg)
+	_, err := d.db.Exec("DELETE FROM block_receiver WHERE receiver = ? COLLATE NOCASE AND tg IS ?", receiver, tg)
 	if err != nil {
 		return nil, err
 	}

@@ -678,11 +678,13 @@ func TestProperty_BlockCheckOrder(t *testing.T) {
 			}
 
 			mail := &smtpmod.ParsedMail{
-				From:    senderAddr,
-				To:      receiverAddr,
-				Subject: "Test",
-				Date:    "2024-01-15",
-				Text:    "body",
+				From:               senderAddr,
+				To:                 receiverAddr,
+				EnvelopeFrom:       senderAddr,
+				EnvelopeRecipients: []string{receiverAddr},
+				Subject:            "Test",
+				Date:               "2024-01-15",
+				Text:               "body",
 			}
 
 			// HandleMail will populate caches as it checks each block level.
@@ -1416,12 +1418,14 @@ func TestProperty_MailMultiDeliverySelectiveAlert(t *testing.T) {
 
 			// Create a mail addressed to the bound domain
 			mail := &smtpmod.ParsedMail{
-				From:    "sender@external.com",
-				To:      "someone@" + domain,
-				Subject: subject,
-				Date:    "2024-06-15",
-				RawDate: "2024-06-15",
-				Text:    body,
+				From:               "sender@external.com",
+				To:                 "someone@" + domain,
+				EnvelopeFrom:       "sender@external.com",
+				EnvelopeRecipients: []string{"someone@" + domain},
+				Subject:            subject,
+				Date:               "2024-06-15",
+				RawDate:            "2024-06-15",
+				Text:               body,
 			}
 
 			// Execute

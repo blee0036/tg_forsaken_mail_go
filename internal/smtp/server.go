@@ -40,8 +40,16 @@ type Attachment struct {
 
 // ParsedMail represents a parsed email message.
 type ParsedMail struct {
-	From        string
-	To          string
+	// From, To, and Cc are decoded MIME headers for display only.
+	From string
+	To   string
+	Cc   string
+
+	// EnvelopeFrom and EnvelopeRecipients come from SMTP MAIL FROM and RCPT TO.
+	// Routing and filtering must use these fields, never the display headers above.
+	EnvelopeFrom       string
+	EnvelopeRecipients []string
+
 	Subject     string
 	Date        string     // Existing semantics: date.String() on success, raw header on failure
 	RawDate     string     // Always stores the raw Date header string
@@ -53,6 +61,11 @@ type ParsedMail struct {
 
 // MailHandler is a callback type for handling incoming mail.
 type MailHandler func(mail *ParsedMail)
+
+const (
+	maxMessageBytes int64 = 25 << 20
+	maxRecipients         = 100
+)
 
 // Server is an SMTP server that receives mail and invokes a handler.
 type Server struct {
@@ -76,6 +89,13 @@ func (s *Server) OnMessage(handler MailHandler) {
 
 // Start starts the SMTP server (blocking).
 func (s *Server) Start() error {
+	srv := s.smtpServer()
+
+	log.Printf("SMTP server listening on %s", srv.Addr)
+	return srv.ListenAndServe()
+}
+
+func (s *Server) smtpServer() *gosmtp.Server {
 	be := &backend{handler: s.handler}
 	srv := gosmtp.NewServer(be)
 
@@ -84,9 +104,10 @@ func (s *Server) Start() error {
 	srv.AllowInsecureAuth = true
 	srv.ReadTimeout = 60 * time.Second
 	srv.WriteTimeout = 60 * time.Second
+	srv.MaxMessageBytes = maxMessageBytes
+	srv.MaxRecipients = maxRecipients
 
-	log.Printf("SMTP server listening on %s", srv.Addr)
-	return srv.ListenAndServe()
+	return srv
 }
 
 // decodeRFC2047 decodes RFC 2047 encoded-words (e.g. =?utf-8?q?...?=) in a header value.
@@ -118,6 +139,21 @@ func formatAddress(addr *gomail.Address) string {
 	return addr.Address
 }
 
+func formatAddressList(addrs []*gomail.Address) string {
+	formatted := make([]string, 0, len(addrs))
+	for _, addr := range addrs {
+		formatted = append(formatted, formatAddress(addr))
+	}
+	return strings.Join(formatted, ", ")
+}
+
+func displayAddressHeader(header gomail.Header, field string) string {
+	if addresses, err := header.AddressList(field); err == nil && len(addresses) > 0 {
+		return formatAddressList(addresses)
+	}
+	return decodeRFC2047(header.Get(field))
+}
+
 func decodeRFC2047(s string) string {
 	decoded, err := mimeDecoder.DecodeHeader(s)
 	if err != nil {
@@ -140,17 +176,9 @@ func ParseMail(r io.Reader) (*ParsedMail, error) {
 	// Extract headers
 	header := mr.Header
 
-	if fromList, err := header.AddressList("From"); err == nil && len(fromList) > 0 {
-		parsed.From = formatAddress(fromList[0])
-	} else {
-		parsed.From = decodeRFC2047(header.Get("From"))
-	}
-
-	if toList, err := header.AddressList("To"); err == nil && len(toList) > 0 {
-		parsed.To = formatAddress(toList[0])
-	} else {
-		parsed.To = decodeRFC2047(header.Get("To"))
-	}
+	parsed.From = displayAddressHeader(header, "From")
+	parsed.To = displayAddressHeader(header, "To")
+	parsed.Cc = displayAddressHeader(header, "Cc")
 
 	if subject, err := header.Subject(); err == nil {
 		parsed.Subject = subject
@@ -249,13 +277,8 @@ func (s *session) Data(r io.Reader) error {
 		return err
 	}
 
-	// If headers were not set from MIME, use envelope data
-	if parsed.From == "" {
-		parsed.From = s.from
-	}
-	if parsed.To == "" && len(s.to) > 0 {
-		parsed.To = s.to[0]
-	}
+	parsed.EnvelopeFrom = s.from
+	parsed.EnvelopeRecipients = append([]string(nil), s.to...)
 
 	if s.handler != nil {
 		s.handler(parsed)

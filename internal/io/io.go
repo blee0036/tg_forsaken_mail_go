@@ -40,16 +40,18 @@ var zeroWidthRegex = regexp.MustCompile(`[\x{200B}\x{200C}\x{200D}\x{FEFF}\x{034
 
 // IO is the core business logic module, corresponding to Node version modules/io.js.
 type IO struct {
-	domainToUser  sync.Map
-	db            *db.DB
-	bot           TelegramSender
-	config        *config.Config
-	blockDomain   *lrucache.Cache
-	blockSender   *lrucache.Cache
-	blockReceiver *lrucache.Cache
-	blockCache    *lrucache.Cache
-	langCache     *lrucache.Cache
-	snowflakeNode *snowflake.Node
+	domainToUser   sync.Map
+	domainConflict sync.Map
+	db             *db.DB
+	bot            TelegramSender
+	config         *config.Config
+	blockDomain    *lrucache.Cache
+	blockSender    *lrucache.Cache
+	blockReceiver  *lrucache.Cache
+	blockCache     *lrucache.Cache
+	langCache      *lrucache.Cache
+	snowflakeNode  *snowflake.Node
+	mailRetry      mailRetryPolicy
 	// UploadHTMLFunc is an optional function for uploading HTML content.
 	// It takes HTML bytes and returns a uuid string (empty on failure) and an error.
 	// Set this after creating the upload module (Task 7.1).
@@ -72,6 +74,7 @@ func New(database *db.DB, cfg *config.Config) *IO {
 		blockCache:    lrucache.New(9000),
 		langCache:     lrucache.New(256),
 		snowflakeNode: node,
+		mailRetry:     defaultMailRetryPolicy(),
 	}
 }
 
@@ -83,7 +86,18 @@ func (o *IO) Init() error {
 	}
 
 	for _, d := range domains {
-		o.domainToUser.Store(d.Domain, d.Tg)
+		domain := normalizeDomain(d.Domain)
+		if domain == "" {
+			continue
+		}
+		if _, conflicted := o.domainConflict.Load(domain); conflicted {
+			continue
+		}
+		if existing, loaded := o.domainToUser.LoadOrStore(domain, d.Tg); loaded && existing.(int64) != d.Tg {
+			o.domainToUser.Delete(domain)
+			o.domainConflict.Store(domain, struct{}{})
+			log.Printf("conflicting case-insensitive domain bindings for %s; refusing to route until the database is corrected", domain)
+		}
 	}
 
 	return nil
@@ -107,8 +121,11 @@ func (o *IO) FormatMailNotification(mail *smtpmod.ParsedMail, lang string, now .
 	}
 	timeStr := FormatMailTime(mail.DateTime, mail.RawDate, lang, t)
 	headers := "*From:* " + escapeMdV2(mail.From) + "\n" +
-		"*To:* " + escapeMdV2(mail.To) + "\n" +
-		"*Subject:* " + escapeMdV2(mail.Subject) + "\n" +
+		"*To:* " + escapeMdV2(mail.To) + "\n"
+	if mail.Cc != "" {
+		headers += "*Cc:* " + escapeMdV2(mail.Cc) + "\n"
+	}
+	headers += "*Subject:* " + escapeMdV2(mail.Subject) + "\n" +
 		"*Time:* " + escapeMdV2(timeStr)
 
 	truncHint := "\n\n\\.\\.\\.✂️ " + escapeMdV2(i18n.Get("msg_truncated", lang))
@@ -365,164 +382,28 @@ func fixUnclosedBold(s string) string {
 // checks block lists, formats and sends the message via Telegram bot.
 // Corresponds to the mailin.on('message', ...) handler in Node version io.js.
 func (o *IO) HandleMail(mail *smtpmod.ParsedMail) {
-	to := strings.ToLower(mail.To)
-	matches := emailRegex.FindString(to)
-	if matches == "" {
+	if mail == nil {
 		return
 	}
-	receiver := matches
-	mailPart := strings.SplitN(receiver, "@", 2)
-	if len(mailPart) != 2 {
-		log.Printf("error domain %s", to)
-		return
-	}
-	domain := mailPart[1]
-
-	val, exists := o.domainToUser.Load(domain)
-	if !exists {
-		return
-	}
-	tgID := val.(int64)
-
-	from := strings.ToLower(mail.From)
-	senderMatch := emailRegex.FindString(from)
-	if senderMatch == "" {
-		return
-	}
-	sender := senderMatch
-	senderPart := strings.SplitN(sender, "@", 2)
-	if len(senderPart) != 2 {
-		log.Printf("error sender domain %s", from)
-		return
-	}
-	sendDomain := senderPart[1]
-
-	tgKey := fmt.Sprintf("%d", tgID)
-
-	// Check block receiver
-	receiverBlockMatch := o.getBlockSet(tgKey, o.blockReceiver, func() (map[string]bool, error) {
-		list, err := o.db.SelectUserAllBlockReceiver(tgID)
-		if err != nil {
-			return nil, err
+	for _, target := range o.mailTargets(mail) {
+		delivery, ok := o.prepareMailDelivery(mail, target)
+		if ok {
+			o.handleMailDelivery(mail, delivery)
 		}
-		set := make(map[string]bool)
-		for _, info := range list {
-			set[info.Receiver] = true
-		}
-		return set, nil
-	})
-	if receiverBlockMatch != nil && receiverBlockMatch[receiver] {
-		return
 	}
+}
 
-	// Check block domain
-	domainBlockMatch := o.getBlockSet(tgKey, o.blockDomain, func() (map[string]bool, error) {
-		list, err := o.db.SelectUserAllBlockDomain(tgID)
-		if err != nil {
-			return nil, err
-		}
-		set := make(map[string]bool)
-		for _, info := range list {
-			set[info.Domain] = true
-		}
-		return set, nil
-	})
-	if domainBlockMatch != nil && domainBlockMatch[sendDomain] {
-		return
-	}
-
-	// Check block sender
-	senderBlockMatch := o.getBlockSet(tgKey, o.blockSender, func() (map[string]bool, error) {
-		list, err := o.db.SelectUserAllBlockSender(tgID)
-		if err != nil {
-			return nil, err
-		}
-		set := make(map[string]bool)
-		for _, info := range list {
-			set[info.Sender] = true
-		}
-		return set, nil
-	})
-	if senderBlockMatch != nil && senderBlockMatch[sender] {
-		return
-	}
+func (o *IO) handleMailDelivery(mail *smtpmod.ParsedMail, delivery mailDelivery) {
+	tgID := delivery.tgID
 
 	// Format email message using FormatMailNotification with user's language preference
 	lang := o.GetUserLang(tgID)
 	email := o.FormatMailNotification(mail, lang)
 
-	// Create inline keyboard with block buttons
-	blockSenderData := o.CheckButtonData(sender, "block_sender")
-	blockReceiverData := o.CheckButtonData(receiver, "block_receiver")
-	blockDomainData := o.CheckButtonData(sendDomain, "block_domain")
+	keyboard := o.mailActionKeyboard(delivery)
 
-	keyboard := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("Block Sender", blockSenderData),
-			tgbotapi.NewInlineKeyboardButtonData("Block Receiver", blockReceiverData),
-			tgbotapi.NewInlineKeyboardButtonData("Block Domain", blockDomainData),
-		),
-	)
-
-	// Send message with inline keyboard using HTML parse mode
 	if o.bot != nil {
-		msg := tgbotapi.NewMessage(tgID, email)
-		msg.ParseMode = "MarkdownV2"
-		msg.ReplyMarkup = keyboard
-		if _, err := o.bot.Send(msg); err != nil {
-			log.Printf("failed to send mail message with MarkdownV2 mode: %v\nMessage content:\n%s", err, email)
-			// Retry without parse mode as fallback
-			msg.ParseMode = ""
-			if _, err := o.bot.Send(msg); err != nil {
-				log.Printf("failed to send mail message (fallback): %v", err)
-			}
-		}
-
-		// Send attachments
-		for _, attachment := range mail.Attachments {
-			if len(attachment.Content) > 0 {
-				doc := tgbotapi.NewDocument(tgID, tgbotapi.FileBytes{
-					Name:  attachment.Filename,
-					Bytes: attachment.Content,
-				})
-				if _, err := o.bot.Send(doc); err != nil {
-					log.Printf("failed to send attachment: %v", err)
-				}
-			}
-		}
-
-		// Handle HTML content
-		if mail.HTML != "" {
-			htmlBytes := []byte(mail.HTML)
-			fileBytes := tgbotapi.FileBytes{
-				Name:  "content.html",
-				Bytes: htmlBytes,
-			}
-
-			var uploadUUID string
-			if o.config.UploadURL != "" && o.UploadHTMLFunc != nil {
-				uuid, err := o.UploadHTMLFunc(htmlBytes)
-				if err != nil {
-					log.Printf("failed to upload HTML: %v", err)
-				} else {
-					uploadUUID = uuid
-				}
-			}
-
-			doc := tgbotapi.NewDocument(tgID, fileBytes)
-			if uploadUUID != "" {
-				viewURL := o.config.UploadURL + "/mail/" + uploadUUID
-				docKeyboard := tgbotapi.NewInlineKeyboardMarkup(
-					tgbotapi.NewInlineKeyboardRow(
-						tgbotapi.NewInlineKeyboardButtonURL("View Directly", viewURL),
-					),
-				)
-				doc.ReplyMarkup = docKeyboard
-			}
-			if _, err := o.bot.Send(doc); err != nil {
-				log.Printf("failed to send HTML document: %v", err)
-			}
-		}
+		o.deliverMailToSender(mail, delivery, o.bot, "primary", email, keyboard)
 	}
 }
 
@@ -583,6 +464,12 @@ func (o *IO) BindDefaultDomain(tgID int64) string {
 
 // BindDomainWith binds a domain to the user, sending replies via the given sender. Returns the reply message string.
 func (o *IO) BindDomainWith(sender TelegramSender, tgID int64, domain string) string {
+	domain = normalizeDomain(domain)
+	if _, conflicted := o.domainConflict.Load(domain); conflicted {
+		msg := "This domain has conflicting bindings in the database!"
+		o.sendMessageWith(sender, tgID, msg)
+		return msg
+	}
 	if val, exists := o.domainToUser.Load(domain); exists {
 		if val.(int64) == tgID {
 			msg := "This domain has already bind on your account!"
@@ -609,6 +496,7 @@ func (o *IO) BindDomain(tgID int64, domain string) string {
 
 // RemoveDomainWith removes a domain binding for the user, sending replies via the given sender. Returns the reply message string.
 func (o *IO) RemoveDomainWith(sender TelegramSender, tgID int64, domain string) string {
+	domain = normalizeDomain(domain)
 	if val, exists := o.domainToUser.Load(domain); exists {
 		if val.(int64) == tgID {
 			o.domainToUser.Delete(domain)
@@ -734,7 +622,7 @@ func (o *IO) CheckButtonData(data string, key string) string {
 
 // BlockSenderWith blocks a sender for the given user, sending replies via the given sender. Returns the success message.
 func (o *IO) BlockSenderWith(sender TelegramSender, tgID int64, senderAddr string) string {
-	data := o.getTrueBlockData(senderAddr)
+	data := normalizeMailboxIdentity(o.getTrueBlockData(senderAddr))
 	o.db.InsertBlockSender(data, tgID)
 	o.blockSender.Delete(fmt.Sprintf("%d", tgID))
 
@@ -750,7 +638,7 @@ func (o *IO) BlockSender(tgID int64, senderAddr string) string {
 
 // BlockDomainWith blocks a domain for the given user, sending replies via the given sender. Returns the success message.
 func (o *IO) BlockDomainWith(sender TelegramSender, tgID int64, domain string) string {
-	data := o.getTrueBlockData(domain)
+	data := normalizeDomain(o.getTrueBlockData(domain))
 	o.db.InsertBlockDomain(data, tgID)
 	o.blockDomain.Delete(fmt.Sprintf("%d", tgID))
 
@@ -766,7 +654,7 @@ func (o *IO) BlockDomain(tgID int64, domain string) string {
 
 // BlockReceiverWith blocks a receiver for the given user, sending replies via the given sender. Returns the success message.
 func (o *IO) BlockReceiverWith(sender TelegramSender, tgID int64, receiver string) string {
-	data := o.getTrueBlockData(receiver)
+	data := normalizeMailboxIdentity(o.getTrueBlockData(receiver))
 	o.db.InsertBlockReceiver(data, tgID)
 	o.blockReceiver.Delete(fmt.Sprintf("%d", tgID))
 
@@ -782,6 +670,7 @@ func (o *IO) BlockReceiver(tgID int64, receiver string) string {
 
 // RemoveBlockSenderWith removes a sender block for the given user, sending replies via the given sender. Returns the success message.
 func (o *IO) RemoveBlockSenderWith(sender TelegramSender, tgID int64, senderAddr string) string {
+	senderAddr = normalizeMailboxIdentity(senderAddr)
 	o.db.DeleteBlockSender(senderAddr, tgID)
 	o.blockSender.Delete(fmt.Sprintf("%d", tgID))
 
@@ -797,6 +686,7 @@ func (o *IO) RemoveBlockSender(tgID int64, senderAddr string) string {
 
 // RemoveBlockDomainWith removes a domain block for the given user, sending replies via the given sender. Returns the success message.
 func (o *IO) RemoveBlockDomainWith(sender TelegramSender, tgID int64, domain string) string {
+	domain = normalizeDomain(domain)
 	o.db.DeleteBlockDomain(domain, tgID)
 	o.blockDomain.Delete(fmt.Sprintf("%d", tgID))
 
@@ -812,6 +702,7 @@ func (o *IO) RemoveBlockDomain(tgID int64, domain string) string {
 
 // RemoveBlockReceiverWith removes a receiver block for the given user, sending replies via the given sender. Returns the success message.
 func (o *IO) RemoveBlockReceiverWith(sender TelegramSender, tgID int64, receiver string) string {
+	receiver = normalizeMailboxIdentity(receiver)
 	o.db.DeleteBlockReceiver(receiver, tgID)
 	o.blockReceiver.Delete(fmt.Sprintf("%d", tgID))
 

@@ -21,6 +21,9 @@ func TestComparison_ConfigSimpleByteLevelIdentity(t *testing.T) {
 	}
 
 	rootBytes, err := os.ReadFile(rootPath)
+	if os.IsNotExist(err) {
+		t.Skipf("upstream config fixture is not available at %s", rootPath)
+	}
 	if err != nil {
 		t.Fatalf("failed to read root config-simple.json: %v", err)
 	}
