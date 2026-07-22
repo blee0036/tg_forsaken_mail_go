@@ -4,7 +4,8 @@
     "port": 25,
     "disableWebhook": true
   },
-  "mail_domain" : "tgmail.party",
+  "mail_domain" : "mx.tgmail.party",
+  "default_mail_domain" : "tgmail.party",
   "telegram_bot_token" : "",
   "admin_tg_id" : "",
   "upload_url" : "",

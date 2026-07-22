@@ -20,8 +20,14 @@ func TestLoad_ValidConfigSimple(t *testing.T) {
 	if cfg.Mailin.DisableWebhook != true {
 		t.Errorf("Mailin.DisableWebhook = %v, want true", cfg.Mailin.DisableWebhook)
 	}
-	if cfg.MailDomain != "tgmail.party" {
-		t.Errorf("MailDomain = %q, want %q", cfg.MailDomain, "tgmail.party")
+	if cfg.MailDomain != "mx.tgmail.party" {
+		t.Errorf("MailDomain = %q, want %q", cfg.MailDomain, "mx.tgmail.party")
+	}
+	if cfg.DefaultMailDomain != "tgmail.party" {
+		t.Errorf("DefaultMailDomain = %q, want %q", cfg.DefaultMailDomain, "tgmail.party")
+	}
+	if cfg.DefaultDomain() != "tgmail.party" {
+		t.Errorf("DefaultDomain() = %q, want %q", cfg.DefaultDomain(), "tgmail.party")
 	}
 	if cfg.TelegramBotToken != "" {
 		t.Errorf("TelegramBotToken = %q, want empty", cfg.TelegramBotToken)
@@ -34,6 +40,65 @@ func TestLoad_ValidConfigSimple(t *testing.T) {
 	}
 	if cfg.UploadToken != "" {
 		t.Errorf("UploadToken = %q, want empty", cfg.UploadToken)
+	}
+}
+
+func TestDefaultDomain_Normalization(t *testing.T) {
+	cases := []struct {
+		name       string
+		mailDomain string
+		defaultDom string
+		want       string
+	}{
+		{"plain default", "mx.example.com", "example.com", "example.com"},
+		{"uppercase lowercased", "mx.example.com", "Example.COM", "example.com"},
+		{"trailing dot trimmed", "mx.example.com", "example.com.", "example.com"},
+		{"whitespace trimmed", "mx.example.com", "  example.com  ", "example.com"},
+		{"fallback to mail_domain", "mx.example.com", "", "mx.example.com"},
+		{"fallback normalizes too", "MX.Example.COM.", "", "mx.example.com"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{MailDomain: tc.mailDomain, DefaultMailDomain: tc.defaultDom}
+			if got := cfg.DefaultDomain(); got != tc.want {
+				t.Errorf("DefaultDomain() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoad_RejectsWildcardDefaultMailDomain(t *testing.T) {
+	path := writeTempConfig(t, `{
+		"mailin": {"host": "0.0.0.0", "port": 25, "disableWebhook": true},
+		"mail_domain": "mx.example.com",
+		"default_mail_domain": "*.example.com",
+		"telegram_bot_token": "",
+		"admin_tg_id": ""
+	}`)
+
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected an error for wildcard default_mail_domain, got nil")
+	}
+}
+
+func TestLoad_NormalizesDefaultMailDomain(t *testing.T) {
+	path := writeTempConfig(t, `{
+		"mailin": {"host": "0.0.0.0", "port": 25, "disableWebhook": true},
+		"mail_domain": "mx.example.com",
+		"default_mail_domain": "  Example.COM.  ",
+		"telegram_bot_token": "",
+		"admin_tg_id": ""
+	}`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.DefaultMailDomain != "example.com" {
+		t.Errorf("DefaultMailDomain = %q, want %q (should be normalized)", cfg.DefaultMailDomain, "example.com")
+	}
+	if cfg.DefaultDomain() != "example.com" {
+		t.Errorf("DefaultDomain() = %q, want %q", cfg.DefaultDomain(), "example.com")
 	}
 }
 

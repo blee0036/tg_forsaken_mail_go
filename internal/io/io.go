@@ -426,12 +426,13 @@ func (o *IO) getBlockSet(tgKey string, c *lrucache.Cache, loader func() (map[str
 // and sends success messages via the given sender. Returns the domain string (empty if failed).
 func (o *IO) BindDefaultDomainWith(sender TelegramSender, tgID int64) string {
 	tryTime := 0
-	domain := strings.ToLower(gofakeit.FirstName()+gofakeit.LastName()) + "." + o.config.MailDomain
+	baseDomain := o.config.DefaultDomain()
+	domain := strings.ToLower(gofakeit.FirstName()+gofakeit.LastName()) + "." + baseDomain
 
 	for tryTime < 5 {
 		if _, exists := o.domainToUser.Load(domain); exists {
 			tryTime++
-			domain = strings.ToLower(gofakeit.FirstName()+gofakeit.LastName()) + "." + o.config.MailDomain
+			domain = strings.ToLower(gofakeit.FirstName()+gofakeit.LastName()) + "." + baseDomain
 			continue
 		}
 		break

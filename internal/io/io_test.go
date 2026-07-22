@@ -13,6 +13,15 @@ import (
 // newTestIO creates an IO instance backed by a temporary SQLite database.
 func newTestIO(t *testing.T) (*IO, *db.DB) {
 	t.Helper()
+	return newTestIOWithConfig(t, &config.Config{
+		MailDomain: "test.example.com",
+	})
+}
+
+// newTestIOWithConfig creates an IO instance backed by a temporary SQLite
+// database using the provided config.
+func newTestIOWithConfig(t *testing.T, cfg *config.Config) (*IO, *db.DB) {
+	t.Helper()
 	tmpFile, err := os.CreateTemp("", "test-io-*.db")
 	if err != nil {
 		t.Fatalf("failed to create temp db: %v", err)
@@ -25,10 +34,6 @@ func newTestIO(t *testing.T) (*IO, *db.DB) {
 		t.Fatalf("failed to create db: %v", err)
 	}
 	t.Cleanup(func() { database.Close() })
-
-	cfg := &config.Config{
-		MailDomain: "test.example.com",
-	}
 
 	io := New(database, cfg)
 	return io, database
@@ -320,6 +325,61 @@ func TestBindDefaultDomain(t *testing.T) {
 	}
 	if len(records) != 1 || records[0].Tg != 100 {
 		t.Errorf("expected 1 record with tg=100, got %v", records)
+	}
+}
+
+func TestBindDefaultDomainUsesWildcardBase(t *testing.T) {
+	// mail_domain is the MX-target host used only as a hint; default_mail_domain
+	// is the wildcard base used for auto-assigned addresses. A user should get
+	// name.example.com, NOT name.mx.example.com.
+	cfg := &config.Config{
+		MailDomain:        "mx.example.com",
+		DefaultMailDomain: "example.com",
+	}
+	io, _ := newTestIOWithConfig(t, cfg)
+
+	domain := io.BindDefaultDomain(100)
+	if domain == "" {
+		t.Fatal("expected a domain, got empty string")
+	}
+
+	// Generated domain must be built on the wildcard base example.com.
+	if !strings.HasSuffix(domain, ".example.com") {
+		t.Errorf("domain %q should end with .example.com", domain)
+	}
+	// It must NOT be built on the MX host mx.example.com.
+	if strings.HasSuffix(domain, ".mx.example.com") {
+		t.Errorf("domain %q must not be built on the MX host mx.example.com", domain)
+	}
+
+	// The MX-target hint remains mx.example.com so users add the correct MX record.
+	if io.config.MailDomain != "mx.example.com" {
+		t.Errorf("MailDomain hint = %q, want %q", io.config.MailDomain, "mx.example.com")
+	}
+	if io.config.DefaultDomain() != "example.com" {
+		t.Errorf("DefaultDomain() = %q, want %q", io.config.DefaultDomain(), "example.com")
+	}
+}
+
+func TestBindDefaultDomainNormalizesCase(t *testing.T) {
+	// A mixed-case / trailing-dot base domain must produce a normalized
+	// (lowercase, no trailing dot) generated domain, so it matches the
+	// lowercase form used by mail routing at delivery time.
+	cfg := &config.Config{
+		MailDomain:        "mx.example.com",
+		DefaultMailDomain: "Example.COM.",
+	}
+	io, _ := newTestIOWithConfig(t, cfg)
+
+	domain := io.BindDefaultDomain(100)
+	if domain == "" {
+		t.Fatal("expected a domain, got empty string")
+	}
+	if domain != strings.ToLower(domain) {
+		t.Errorf("domain %q should be all lowercase", domain)
+	}
+	if !strings.HasSuffix(domain, ".example.com") {
+		t.Errorf("domain %q should end with .example.com (normalized base)", domain)
 	}
 }
 

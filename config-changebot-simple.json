@@ -4,7 +4,8 @@
     "port": 25,
     "disableWebhook": true
   },
-  "mail_domain": "YOUR_MAIL_DOMAIN",
+  "mail_domain": "mx.YOUR_MAIL_DOMAIN",
+  "default_mail_domain": "YOUR_MAIL_DOMAIN",
   "telegram_bot_token": "YOUR_NEW_BOT_TOKEN",
   "admin_tg_id": "YOUR_ADMIN_TG_ID",
   "upload_url": "",

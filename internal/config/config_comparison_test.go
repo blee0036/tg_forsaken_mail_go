@@ -63,9 +63,14 @@ func TestComparison_GoConfigMatchesNodeRequire(t *testing.T) {
 		t.Errorf("Mailin.DisableWebhook = %v, want true (Node: mailin.disableWebhook)", cfg.Mailin.DisableWebhook)
 	}
 
-	// mail_domain = "tgmail.party"
-	if cfg.MailDomain != "tgmail.party" {
-		t.Errorf("MailDomain = %q, want %q (Node: mail_domain)", cfg.MailDomain, "tgmail.party")
+	// mail_domain = "mx.tgmail.party"
+	if cfg.MailDomain != "mx.tgmail.party" {
+		t.Errorf("MailDomain = %q, want %q (Node: mail_domain)", cfg.MailDomain, "mx.tgmail.party")
+	}
+
+	// default_mail_domain = "tgmail.party"
+	if cfg.DefaultMailDomain != "tgmail.party" {
+		t.Errorf("DefaultMailDomain = %q, want %q (Node: default_mail_domain)", cfg.DefaultMailDomain, "tgmail.party")
 	}
 
 	// telegram_bot_token = ""

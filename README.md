@@ -24,8 +24,12 @@ A self-hosted email-to-Telegram forwarding service written in Go. Receives email
 
 | Type | Name | Value | TTL |
 |------|------|-------|-----|
-| A | `mail` | `<your server IP>` | 300 |
-| MX | `@` | `mail.yourdomain.com` | 300 |
+| A | `mx` | `<your server IP>` | 300 |
+| MX | `*` | `mx.yourdomain.com` | 300 |
+
+The wildcard MX record (`*`) makes every subdomain such as `name.yourdomain.com` deliver to your server, which is what default-assigned domains rely on. `mail_domain` is the MX target host (`mx.yourdomain.com`), and `default_mail_domain` is the base domain used for auto-assigned addresses (`yourdomain.com`).
+
+DNS 说明：`mx` 的 A 记录指向服务器 IP；泛域名 MX 记录（`*`）让 `name.yourdomain.com` 之类的所有子域都投递到你的服务器，默认分配的域名依赖于此。`mail_domain` 是 MX 目标主机（`mx.yourdomain.com`），`default_mail_domain` 是自动分配邮箱使用的基础域（`yourdomain.com`）。
 
 > Make sure port 25 is open and not blocked by your hosting provider.
 >
@@ -45,7 +49,8 @@ cp config-simple.json config.json
     "host": "0.0.0.0",
     "port": 25
   },
-  "mail_domain": "yourdomain.com",
+  "mail_domain": "mx.yourdomain.com",
+  "default_mail_domain": "yourdomain.com",
   "telegram_bot_token": "your-bot-token",
   "admin_tg_id": "your-telegram-id",
   "upload_url": "",
@@ -55,7 +60,8 @@ cp config-simple.json config.json
 
 | Field | Description / 说明 |
 |-------|-------------------|
-| `mail_domain` | MX record domain / MX 记录域名 |
+| `mail_domain` | MX record host, shown as the MX target hint (e.g. `mx.example.com`) / MX 记录主机，作为提示展示（如 `mx.example.com`） |
+| `default_mail_domain` | Wildcard base domain for auto-assigned default addresses (e.g. `example.com` → `name.example.com`). Falls back to `mail_domain` when empty / 自动分配默认邮箱使用的泛域名基础域（如 `example.com` → `name.example.com`），留空时回退到 `mail_domain` |
 | `telegram_bot_token` | Bot token from @BotFather |
 | `admin_tg_id` | Your Telegram user ID, enables `/send_all` / 你的 Telegram ID，启用广播功能 |
 | `upload_url` | Optional: HTML upload endpoint / 可选：HTML 上传地址 |
