@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"fmt"
+	"html"
 	"log"
 	"regexp"
 	"strings"
@@ -14,16 +15,12 @@ import (
 	"go-version-rewrite/internal/io"
 )
 
-// DomainRegex matches valid domain names, equivalent to Node version:
-// /((?=[a-z0-9-]{1,63}\.)(xn--)?[a-z0-9]+(-[a-z0-9]+)*\.)+[a-z]{2,63}/i
-// Note: Go's RE2 engine does not support lookaheads (?=...). The lookahead
-// (?=[a-z0-9-]{1,63}\.) constrains each label to 1-63 chars. We drop it here
-// since the base pattern already matches valid domains correctly for practical use.
-var DomainRegex = regexp.MustCompile(`(?i)((xn--)?[a-z0-9]+(-[a-z0-9]+)*\.)+[a-z]{2,63}`)
+// DomainRegex requires the entire argument to be a domain. A trailing DNS dot
+// is accepted and removed later by normalizeDomain.
+var DomainRegex = regexp.MustCompile(`(?i)^((xn--)?[a-z0-9]+(-[a-z0-9]+)*\.)+[a-z]{2,63}\.?$`)
 
-// EmailRegex matches email addresses, equivalent to Node version:
-// /[\w\._\-\+]+@[\w\._\-\+]+/i
-var EmailRegex = regexp.MustCompile(`(?i)[\w._\-+]+@[\w._\-+]+`)
+// EmailRegex requires the entire argument to be an email-like mailbox value.
+var EmailRegex = regexp.MustCompile(`(?i)^[\w._\-+]+@[\w._\-+]+$`)
 
 // BotSender abstracts the Telegram Bot sending capability for testability.
 type BotSender interface {
@@ -64,7 +61,7 @@ type Bot struct {
 	sender BotSender        // used for all Send/Request calls
 	io     *io.IO
 	config *config.Config
-	opts   BotOptions // optional configuration (AfterInteraction hook, etc.)
+	opts   BotOptions    // optional configuration (AfterInteraction hook, etc.)
 	stopCh chan struct{} // closed by Stop() to terminate Start() loop
 }
 
@@ -87,6 +84,7 @@ func getDefaultTextsMap() map[string]LangTexts {
 // GenerateHelpMessages generates the English and Chinese help messages with the given mail domain.
 // The output is character-level identical to the Node version telegram.js helpMsg and helpMsgCN.
 func GenerateHelpMessages(mailDomain string) (helpMsg, helpMsgCN string) {
+	mailDomain = html.EscapeString(mailDomain)
 	helpMsg = "<b>list_domain :</b> \n" +
 		"\n <code>/list</code> \n\n" +
 		"list all your binded domain. \n\n" +
@@ -623,7 +621,7 @@ func (b *Bot) buildDomainPage(domains []string, page int, lang string) (string, 
 	text := b.getText("msg_list_title", lang) + "\n\n"
 	var rows [][]tgbotapi.InlineKeyboardButton
 	for i := start; i < end; i++ {
-		text += fmt.Sprintf("%d. <code>%s</code>\n", i+1, domains[i])
+		text += fmt.Sprintf("%d. <code>%s</code>\n", i+1, html.EscapeString(domains[i]))
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData(
 				b.getText("btn_dismiss", lang)+" "+domains[i],
@@ -673,7 +671,8 @@ func (b *Bot) handleBind(msg *tgbotapi.Message, lang string, args []string) {
 	}
 
 	b.io.BindDomainWith(b.sender, msg.Chat.ID, domain)
-	successText := fmt.Sprintf(b.getText("msg_bind_success", lang), domain, b.config.MailDomain, domain)
+	escapedDomain := html.EscapeString(domain)
+	successText := fmt.Sprintf(b.getText("msg_bind_success", lang), escapedDomain, html.EscapeString(b.config.MailDomain), escapedDomain)
 	b.sendHTMLMessage(msg.Chat.ID, successText)
 }
 
@@ -979,7 +978,8 @@ func (b *Bot) handleQuickStart(query *tgbotapi.CallbackQuery, lang string) {
 	if domain == "" {
 		b.sendHTMLMessage(chatID, b.getText("err_bind_default_fail", lang))
 	} else {
-		successText := fmt.Sprintf(b.getText("msg_bind_success", lang), domain, b.config.MailDomain, domain)
+		escapedDomain := html.EscapeString(domain)
+		successText := fmt.Sprintf(b.getText("msg_bind_success", lang), escapedDomain, html.EscapeString(b.config.MailDomain), escapedDomain)
 		b.sendHTMLMessage(chatID, successText)
 	}
 
@@ -1048,7 +1048,7 @@ func (b *Bot) handleMainMenu(query *tgbotapi.CallbackQuery, lang string, action 
 // handleDismissAsk edits the message to show a confirmation prompt with Confirm and Cancel buttons.
 func (b *Bot) handleDismissAsk(query *tgbotapi.CallbackQuery, lang string, domain string) {
 	msg := query.Message
-	promptText := fmt.Sprintf(b.getText("msg_dismiss_confirm_prompt", lang), domain)
+	promptText := fmt.Sprintf(b.getText("msg_dismiss_confirm_prompt", lang), html.EscapeString(domain))
 
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
@@ -1174,7 +1174,7 @@ func (b *Bot) handleBlockCategoryPage(query *tgbotapi.CallbackQuery, lang string
 	text := ""
 	var rows [][]tgbotapi.InlineKeyboardButton
 	for i := start; i < end; i++ {
-		text += fmt.Sprintf("%d. <code>%s</code>\n", i+1, items[i])
+		text += fmt.Sprintf("%d. <code>%s</code>\n", i+1, html.EscapeString(items[i]))
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData(
 				b.getText("btn_unblock", lang)+" "+items[i],

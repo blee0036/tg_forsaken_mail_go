@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestUploadHTML_Success(t *testing.T) {
@@ -110,6 +111,26 @@ func TestUploadHTML_NetworkError(t *testing.T) {
 	}
 }
 
+func TestUploadHTML_Timeout(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+	}))
+	defer server.Close()
+
+	uploader := New(server.URL, "test-token")
+	uploader.client.Timeout = 20 * time.Millisecond
+
+	uuid, err := uploader.UploadHTML([]byte("<html></html>"))
+	close(release)
+	if err == nil {
+		t.Fatal("expected timeout error, got nil")
+	}
+	if uuid != "" {
+		t.Fatalf("uuid = %q, want empty string", uuid)
+	}
+}
+
 func TestUploadHTML_InvalidJSON(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -137,5 +158,8 @@ func TestNew(t *testing.T) {
 	}
 	if uploader.client == nil {
 		t.Error("expected non-nil http client")
+	}
+	if uploader.client.Timeout != defaultUploadTimeout {
+		t.Errorf("client timeout = %s, want %s", uploader.client.Timeout, defaultUploadTimeout)
 	}
 }

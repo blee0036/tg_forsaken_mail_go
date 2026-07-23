@@ -3,6 +3,7 @@ package io
 import (
 	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	"go-version-rewrite/internal/config"
@@ -142,6 +143,52 @@ func TestBindDomain(t *testing.T) {
 	msg = io.BindDomain(200, "example.com")
 	if msg != "This domain has already bind on another account!" {
 		t.Errorf("expected another account message, got %q", msg)
+	}
+}
+
+func TestBindDomainConcurrentSingleOwner(t *testing.T) {
+	ioModule, database := newTestIO(t)
+
+	const workers = 32
+	start := make(chan struct{})
+	results := make(chan string, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(tgID int64) {
+			defer wg.Done()
+			<-start
+			results <- ioModule.BindDomainWith(nil, tgID, "shared.example.com")
+		}(int64(i + 1))
+	}
+
+	close(start)
+	wg.Wait()
+	close(results)
+
+	successes := 0
+	for result := range results {
+		if result == "Bind Success!" {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("successful concurrent bindings = %d, want 1", successes)
+	}
+
+	records, err := database.SelectByDomain("shared.example.com")
+	if err != nil {
+		t.Fatalf("SelectByDomain() error: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("persisted bindings = %#v, want exactly one", records)
+	}
+	owner, ok := ioModule.domainToUser.Load("shared.example.com")
+	if !ok {
+		t.Fatal("in-memory binding is missing")
+	}
+	if owner.(int64) != records[0].Tg {
+		t.Fatalf("in-memory owner = %d, persisted owner = %d", owner.(int64), records[0].Tg)
 	}
 }
 

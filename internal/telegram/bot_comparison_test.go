@@ -70,7 +70,6 @@ const nodeHelpMsgCN = "<b>显示所有绑定域名 :</b> \n" +
 	"<b>显示你所有屏蔽的收件人邮箱 :</b> \n " +
 	"\n<code>/list_block_receiver</code>"
 
-
 // TestComparison_HelpMsgIdentical verifies Go version helpMsg is character-level
 // identical to Node version telegram.js helpMsg.
 func TestComparison_HelpMsgIdentical(t *testing.T) {
@@ -120,8 +119,7 @@ func TestComparison_HelpMsgCNIdentical(t *testing.T) {
 	}
 }
 
-// TestComparison_DomainRegexMatches verifies Go domain regex matches the same
-// test strings as Node version /((?=[a-z0-9-]{1,63}\.)(xn--)?[a-z0-9]+(-[a-z0-9]+)*\.)+[a-z]{2,63}/i
+// TestComparison_DomainRegexMatches verifies complete domain validation.
 func TestComparison_DomainRegexMatches(t *testing.T) {
 	tests := []struct {
 		input string
@@ -129,8 +127,10 @@ func TestComparison_DomainRegexMatches(t *testing.T) {
 	}{
 		{"example.com", true},
 		{"sub.example.com", true},
+		{"example.com.", true},
 		{"invalid", false},
 		{"a.b", false}, // tld too short (1 char)
+		{"example.com</code><b>spoof</b><code>", false},
 	}
 
 	for _, tc := range tests {
@@ -141,8 +141,7 @@ func TestComparison_DomainRegexMatches(t *testing.T) {
 	}
 }
 
-// TestComparison_EmailRegexMatches verifies Go email regex matches the same
-// test strings as Node version /[\w\._\-\+]+@[\w\._\-\+]+/i
+// TestComparison_EmailRegexMatches verifies complete mailbox validation.
 func TestComparison_EmailRegexMatches(t *testing.T) {
 	tests := []struct {
 		input string
@@ -152,6 +151,7 @@ func TestComparison_EmailRegexMatches(t *testing.T) {
 		{"user+tag@domain.com", true},
 		{"invalid", false},
 		{"@domain", false},
+		{"user@example.com</code>", false},
 	}
 
 	for _, tc := range tests {

@@ -2,6 +2,7 @@ package io
 
 import (
 	"fmt"
+	"html"
 	"log"
 	"regexp"
 	"strings"
@@ -40,6 +41,7 @@ var zeroWidthRegex = regexp.MustCompile(`[\x{200B}\x{200C}\x{200D}\x{FEFF}\x{034
 
 // IO is the core business logic module, corresponding to Node version modules/io.js.
 type IO struct {
+	domainMu       sync.Mutex
 	domainToUser   sync.Map
 	domainConflict sync.Map
 	db             *db.DB
@@ -80,6 +82,9 @@ func New(database *db.DB, cfg *config.Config) *IO {
 
 // Init loads all domain mappings from the database into the in-memory map.
 func (o *IO) Init() error {
+	o.domainMu.Lock()
+	defer o.domainMu.Unlock()
+
 	domains, err := o.db.SelectAllDomain()
 	if err != nil {
 		return fmt.Errorf("failed to load domain mappings: %w", err)
@@ -425,25 +430,32 @@ func (o *IO) getBlockSet(tgKey string, c *lrucache.Cache, loader func() (map[str
 // BindDefaultDomainWith generates a random domain using gofakeit, binds it to the user,
 // and sends success messages via the given sender. Returns the domain string (empty if failed).
 func (o *IO) BindDefaultDomainWith(sender TelegramSender, tgID int64) string {
-	tryTime := 0
 	baseDomain := o.config.DefaultDomain()
-	domain := strings.ToLower(gofakeit.FirstName()+gofakeit.LastName()) + "." + baseDomain
+	domain := ""
 
-	for tryTime < 5 {
-		if _, exists := o.domainToUser.Load(domain); exists {
-			tryTime++
-			domain = strings.ToLower(gofakeit.FirstName()+gofakeit.LastName()) + "." + baseDomain
+	o.domainMu.Lock()
+	for tryTime := 0; tryTime < 5; tryTime++ {
+		candidate := strings.ToLower(gofakeit.FirstName()+gofakeit.LastName()) + "." + baseDomain
+		if _, exists := o.domainToUser.Load(candidate); exists {
 			continue
 		}
+		if _, conflicted := o.domainConflict.Load(candidate); conflicted {
+			continue
+		}
+		if _, err := o.db.InsertDomain(candidate, tgID); err != nil {
+			o.domainMu.Unlock()
+			log.Printf("failed to persist default domain binding for %s: %v", candidate, err)
+			return ""
+		}
+		o.domainToUser.Store(candidate, tgID)
+		domain = candidate
 		break
 	}
+	o.domainMu.Unlock()
 
-	if tryTime >= 5 {
+	if domain == "" {
 		return ""
 	}
-
-	o.domainToUser.Store(domain, tgID)
-	o.db.InsertDomain(domain, tgID)
 
 	// Send English success message
 	enMsg := "bind default domain : <code>" + domain + "</code> Success! \n\n" +
@@ -466,12 +478,16 @@ func (o *IO) BindDefaultDomain(tgID int64) string {
 // BindDomainWith binds a domain to the user, sending replies via the given sender. Returns the reply message string.
 func (o *IO) BindDomainWith(sender TelegramSender, tgID int64, domain string) string {
 	domain = normalizeDomain(domain)
+	o.domainMu.Lock()
+
 	if _, conflicted := o.domainConflict.Load(domain); conflicted {
+		o.domainMu.Unlock()
 		msg := "This domain has conflicting bindings in the database!"
 		o.sendMessageWith(sender, tgID, msg)
 		return msg
 	}
 	if val, exists := o.domainToUser.Load(domain); exists {
+		o.domainMu.Unlock()
 		if val.(int64) == tgID {
 			msg := "This domain has already bind on your account!"
 			o.sendMessageWith(sender, tgID, msg)
@@ -482,8 +498,15 @@ func (o *IO) BindDomainWith(sender TelegramSender, tgID int64, domain string) st
 		return msg
 	}
 
+	if _, err := o.db.InsertDomain(domain, tgID); err != nil {
+		o.domainMu.Unlock()
+		log.Printf("failed to persist domain binding for %s: %v", domain, err)
+		msg := "Bind failed, please try again!"
+		o.sendMessageWith(sender, tgID, msg)
+		return msg
+	}
 	o.domainToUser.Store(domain, tgID)
-	o.db.InsertDomain(domain, tgID)
+	o.domainMu.Unlock()
 
 	msg := "Bind Success!"
 	o.sendMessageWith(sender, tgID, msg)
@@ -498,15 +521,25 @@ func (o *IO) BindDomain(tgID int64, domain string) string {
 // RemoveDomainWith removes a domain binding for the user, sending replies via the given sender. Returns the reply message string.
 func (o *IO) RemoveDomainWith(sender TelegramSender, tgID int64, domain string) string {
 	domain = normalizeDomain(domain)
+	o.domainMu.Lock()
+
 	if val, exists := o.domainToUser.Load(domain); exists {
 		if val.(int64) == tgID {
+			if _, err := o.db.DeleteDomain(domain); err != nil {
+				o.domainMu.Unlock()
+				log.Printf("failed to remove persisted domain binding for %s: %v", domain, err)
+				msg := "Release failed, please try again!"
+				o.sendMessageWith(sender, tgID, msg)
+				return msg
+			}
 			o.domainToUser.Delete(domain)
-			o.db.DeleteDomain(domain)
+			o.domainMu.Unlock()
 			msg := "Release Success!"
 			o.sendMessageWith(sender, tgID, msg)
 			return msg
 		}
 	}
+	o.domainMu.Unlock()
 
 	msg := "This domain has not bind to your account!"
 	o.sendMessageWith(sender, tgID, msg)
@@ -526,7 +559,7 @@ func (o *IO) ListDomainWith(sender TelegramSender, tgID int64) string {
 	o.domainToUser.Range(func(key, value interface{}) bool {
 		if value.(int64) == tgID {
 			count++
-			msg += fmt.Sprintf("%d: <code> %s</code> \n", count, key.(string))
+			msg += fmt.Sprintf("%d: <code> %s</code> \n", count, html.EscapeString(key.(string)))
 		}
 		return true
 	})
@@ -728,7 +761,7 @@ func (o *IO) ListBlockSenderWith(sender TelegramSender, tgID int64) string {
 	} else {
 		for _, info := range senders {
 			count++
-			msg += fmt.Sprintf("%d: <code> %s</code> \n", count, info.Sender)
+			msg += fmt.Sprintf("%d: <code> %s</code> \n", count, html.EscapeString(info.Sender))
 		}
 	}
 
@@ -752,7 +785,7 @@ func (o *IO) ListBlockDomainWith(sender TelegramSender, tgID int64) string {
 	} else {
 		for _, info := range domains {
 			count++
-			msg += fmt.Sprintf("%d: <code> %s</code> \n", count, info.Domain)
+			msg += fmt.Sprintf("%d: <code> %s</code> \n", count, html.EscapeString(info.Domain))
 		}
 	}
 
@@ -776,7 +809,7 @@ func (o *IO) ListBlockReceiverWith(sender TelegramSender, tgID int64) string {
 	} else {
 		for _, info := range receivers {
 			count++
-			msg += fmt.Sprintf("%d: <code> %s</code> \n", count, info.Receiver)
+			msg += fmt.Sprintf("%d: <code> %s</code> \n", count, html.EscapeString(info.Receiver))
 		}
 	}
 

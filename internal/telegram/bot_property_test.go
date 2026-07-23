@@ -15,7 +15,7 @@ import (
 	"go-version-rewrite/internal/io"
 )
 
-// Feature: go-version-rewrite, Property 10: Domain regex equivalence
+// Feature: go-version-rewrite, Property 10: complete domain validation
 // Validates: Requirements 6.5, 6.6, 6.7, 6.17
 func TestProperty_DomainRegexEquivalence(t *testing.T) {
 	parameters := gopter.DefaultTestParameters()
@@ -23,16 +23,12 @@ func TestProperty_DomainRegexEquivalence(t *testing.T) {
 
 	properties := gopter.NewProperties(parameters)
 
-	// The Node version regex: /((?=[a-z0-9-]{1,63}\.)(xn--)?[a-z0-9]+(-[a-z0-9]+)*\.)+[a-z]{2,63}/i
-	// Go's RE2 does not support lookaheads, so the Go DomainRegex drops the (?=...) constraint.
-	// The base pattern is: (?i)((xn--)?[a-z0-9]+(-[a-z0-9]+)*\.)+[a-z]{2,63}
-	// We compile a second copy of the same pattern to cross-verify consistency.
-	nodeEquivalent := regexp.MustCompile(`(?i)((xn--)?[a-z0-9]+(-[a-z0-9]+)*\.)+[a-z]{2,63}`)
+	completeDomain := regexp.MustCompile(`(?i)^((xn--)?[a-z0-9]+(-[a-z0-9]+)*\.)+[a-z]{2,63}\.?$`)
 
-	properties.Property("Go DomainRegex matches same strings as Node domain regex equivalent", prop.ForAll(
+	properties.Property("DomainRegex validates the complete input", prop.ForAll(
 		func(s string) bool {
 			goResult := DomainRegex.MatchString(s)
-			nodeResult := nodeEquivalent.MatchString(s)
+			nodeResult := completeDomain.MatchString(s)
 			if goResult != nodeResult {
 				t.Logf("mismatch for %q: Go=%v Node=%v", s, goResult, nodeResult)
 			}
@@ -48,7 +44,7 @@ func TestProperty_DomainRegexEquivalence(t *testing.T) {
 	properties.TestingRun(t)
 }
 
-// Feature: go-version-rewrite, Property 11: Email regex equivalence
+// Feature: go-version-rewrite, Property 11: complete email validation
 // Validates: Requirements 6.8, 6.9, 6.17
 func TestProperty_EmailRegexEquivalence(t *testing.T) {
 	parameters := gopter.DefaultTestParameters()
@@ -56,14 +52,12 @@ func TestProperty_EmailRegexEquivalence(t *testing.T) {
 
 	properties := gopter.NewProperties(parameters)
 
-	// Node version: /[\w\._\-\+]+@[\w\._\-\+]+/i
-	// Go version (exported as EmailRegex): (?i)[\w._\-+]+@[\w._\-+]+
-	nodeEquivalent := regexp.MustCompile(`(?i)[\w._\-+]+@[\w._\-+]+`)
+	completeEmail := regexp.MustCompile(`(?i)^[\w._\-+]+@[\w._\-+]+$`)
 
-	properties.Property("Go EmailRegex matches same strings as Node email regex", prop.ForAll(
+	properties.Property("EmailRegex validates the complete input", prop.ForAll(
 		func(s string) bool {
 			goResult := EmailRegex.MatchString(s)
-			nodeResult := nodeEquivalent.MatchString(s)
+			nodeResult := completeEmail.MatchString(s)
 			if goResult != nodeResult {
 				t.Logf("mismatch for %q: Go=%v Node=%v", s, goResult, nodeResult)
 			}
@@ -215,7 +209,6 @@ func genEmailEdgeCases() gopter.Gen {
 	)
 }
 
-
 // Feature: telegram-interaction-redesign, Property 1: 语言检测的确定性
 // Validates: Requirements 3.1, 3.2, 3.3
 func TestProperty_DetectLanguageDeterminism(t *testing.T) {
@@ -237,9 +230,9 @@ func TestProperty_DetectLanguageDeterminism(t *testing.T) {
 	genNonZhCode := gen.OneGenOf(
 		gen.OneConstOf("", "en", "en-us", "ja", "fr", "de", "ko", "es", "pt", "ru",
 			"ar", "it", "nl", "sv", "pl", "tr", "vi", "th", "id"),
-		gen.RegexMatch(`[a-y][a-gi-z]*`),       // starts with a-y, avoids z; second char avoids h after potential z
-		gen.RegexMatch(`z[a-gi-z][a-zA-Z]*`),   // starts with z but second char is NOT h
-		gen.RegexMatch(`[A-Y][a-zA-Z]*`),        // uppercase, not Z
+		gen.RegexMatch(`[a-y][a-gi-z]*`),           // starts with a-y, avoids z; second char avoids h after potential z
+		gen.RegexMatch(`z[a-gi-z][a-zA-Z]*`),       // starts with z but second char is NOT h
+		gen.RegexMatch(`[A-Y][a-zA-Z]*`),           // uppercase, not Z
 		gen.RegexMatch(`Z[a-gA-Gi-zI-Z][a-zA-Z]*`), // Z followed by non-H
 	)
 
@@ -421,13 +414,13 @@ func TestProperty_ParseCommandWhitespaceInvariance(t *testing.T) {
 
 			return true
 		},
-		genWhitespace, // leadingWS
-		genCmdName,    // cmdName
+		genWhitespace,                // leadingWS
+		genCmdName,                   // cmdName
 		gen.RegexMatch(`[ \t]{1,5}`), // midWS1 (at least 1 space)
-		genArg,        // arg1
+		genArg,                       // arg1
 		gen.RegexMatch(`[ \t]{1,5}`), // midWS2 (at least 1 space)
-		genArg,        // arg2
-		genWhitespace, // trailingWS
+		genArg,                       // arg2
+		genWhitespace,                // trailingWS
 	))
 
 	properties.Property("parseCommand with single arg is whitespace invariant", prop.ForAll(
@@ -451,11 +444,11 @@ func TestProperty_ParseCommandWhitespaceInvariance(t *testing.T) {
 			}
 			return true
 		},
-		genWhitespace, // leadingWS
-		genCmdName,    // cmdName
+		genWhitespace,                // leadingWS
+		genCmdName,                   // cmdName
 		gen.RegexMatch(`[ \t]{1,5}`), // midWS (at least 1 space)
-		genArg,        // arg
-		genWhitespace, // trailingWS
+		genArg,                       // arg
+		genWhitespace,                // trailingWS
 	))
 
 	properties.Property("parseCommand with no args is whitespace invariant", prop.ForAll(
@@ -1090,7 +1083,7 @@ func TestProperty_BlockListUnblockButtons(t *testing.T) {
 
 				// Create a callback query with a message that has Chat and MessageID
 				query := &tgbotapi.CallbackQuery{
-					ID: "test-query-id",
+					ID:   "test-query-id",
 					From: &tgbotapi.User{LanguageCode: lang},
 					Message: &tgbotapi.Message{
 						MessageID: 42,

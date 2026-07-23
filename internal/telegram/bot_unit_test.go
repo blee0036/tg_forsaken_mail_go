@@ -345,6 +345,41 @@ func TestHandleBind_NoArgs_UsageHint(t *testing.T) {
 	}
 }
 
+func TestHandleBindRejectsMarkupInjection(t *testing.T) {
+	bot, sender := newTestBotWithMock(t, 0)
+	msg := &tgbotapi.Message{
+		Chat: &tgbotapi.Chat{ID: 100},
+		From: &tgbotapi.User{LanguageCode: "en"},
+	}
+
+	bot.handleBind(msg, "en", []string{"example.com</code><b>spoof</b><code>"})
+
+	if bot.io.GetAllDomainCount(100) != 0 {
+		t.Fatal("markup-bearing domain must not be bound")
+	}
+	sender.mu.Lock()
+	defer sender.mu.Unlock()
+	if len(sender.messages) != 1 {
+		t.Fatalf("messages = %d, want 1 validation error", len(sender.messages))
+	}
+	response := sender.messages[0].(tgbotapi.MessageConfig)
+	if !strings.Contains(response.Text, "Invalid domain") {
+		t.Fatalf("response = %q, want invalid-domain error", response.Text)
+	}
+}
+
+func TestBuildDomainPageEscapesStoredValues(t *testing.T) {
+	bot, _ := newTestBotWithMock(t, 0)
+	text, _ := bot.buildDomainPage([]string{"example.com</code><b>spoof</b><code>"}, 0, "en")
+
+	if strings.Contains(text, "<b>spoof</b>") {
+		t.Fatalf("domain markup was rendered as Telegram HTML: %q", text)
+	}
+	if !strings.Contains(text, "&lt;/code&gt;&lt;b&gt;spoof&lt;/b&gt;&lt;code&gt;") {
+		t.Fatalf("domain markup was not escaped: %q", text)
+	}
+}
+
 // --- Test 8: Block category navigation, empty list shows "No blocked items" ---
 
 func TestHandleBlockCategory_EmptyList_NoBlockedItems(t *testing.T) {

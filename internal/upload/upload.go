@@ -7,7 +7,10 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"time"
 )
+
+const defaultUploadTimeout = 30 * time.Second
 
 // Uploader handles HTML email uploads to Cloudflare Worker.
 type Uploader struct {
@@ -27,7 +30,7 @@ func New(uploadURL, uploadToken string) *Uploader {
 	return &Uploader{
 		uploadURL:   uploadURL,
 		uploadToken: uploadToken,
-		client:      &http.Client{},
+		client:      &http.Client{Timeout: defaultUploadTimeout},
 	}
 }
 
