@@ -116,7 +116,8 @@ func (o *IO) sendMailMessageWithRetry(
 		return err
 	}
 
-	log.Printf("[%s] mail message MarkdownV2 formatting was rejected; retrying without parse mode", botName)
+	log.Printf("[%s] mail message formatting was rejected; retrying as literal text", botName)
 	message.ParseMode = ""
+	message.Entities = nil
 	return o.sendMailWithRetry(sender, botName, "mail message without parse mode", message)
 }

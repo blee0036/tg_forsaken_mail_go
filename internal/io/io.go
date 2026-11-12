@@ -9,14 +9,12 @@ import (
 	"sync"
 	"time"
 
-	htmltomarkdown "github.com/JohannesKaufmann/html-to-markdown/v2"
 	"github.com/brianvoe/gofakeit/v6"
 	"github.com/bwmarrin/snowflake"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
 	"go-version-rewrite/internal/config"
 	"go-version-rewrite/internal/db"
-	"go-version-rewrite/internal/i18n"
 	"go-version-rewrite/internal/lrucache"
 	smtpmod "go-version-rewrite/internal/smtp"
 )
@@ -26,18 +24,6 @@ var numericRegex = regexp.MustCompile(`^[0-9]+\.?[0-9]*$`)
 
 // emailRegex matches email addresses, used by HandleMail.
 var emailRegex = regexp.MustCompile(`(?i)[\w._\-+]+@[\w._\-+]+`)
-
-// mdImageRegex matches Markdown image syntax ![alt](url)
-var mdImageRegex = regexp.MustCompile(`!\[[^\]]*\]\([^\)]*\)`)
-
-// mdHeadingRegex matches Markdown heading prefixes (# ## ### etc.)
-var mdHeadingRegex = regexp.MustCompile(`(?m)^#{1,6}\s+`)
-
-// emptyLinkRegex matches empty-text Markdown links [](url)
-var emptyLinkRegex = regexp.MustCompile(`\[\]\([^\)]*\)`)
-
-// zeroWidthRegex matches zero-width characters and invisible Unicode used as preheader padding
-var zeroWidthRegex = regexp.MustCompile(`[\x{200B}\x{200C}\x{200D}\x{FEFF}\x{034F}\x{00AD}]+`)
 
 // IO is the core business logic module, corresponding to Node version modules/io.js.
 type IO struct {
@@ -113,69 +99,10 @@ func (o *IO) SetBot(bot TelegramSender) {
 	o.bot = bot
 }
 
-// FormatMailNotification formats a parsed email into a Markdown notification string for Telegram.
-// Strategy:
-//  1. If HTML is available, convert to Markdown and clean for Telegram compatibility.
-//  2. If md exceeds limit and text is empty → truncate md to 3800 + hint to view full email.
-//  3. If md exceeds limit and text is non-empty → use text instead.
-//  4. If text also exceeds limit → truncate text to 3800 + hint to view full email.
+// FormatMailNotification returns a MarkdownV2 serialization for existing callers.
+// Mail delivery uses the same literal-text model with explicit Telegram entities.
 func (o *IO) FormatMailNotification(mail *smtpmod.ParsedMail, lang string, now ...time.Time) string {
-	t := time.Now()
-	if len(now) > 0 {
-		t = now[0]
-	}
-	timeStr := FormatMailTime(mail.DateTime, mail.RawDate, lang, t)
-	headers := "*From:* " + escapeMdV2(mail.From) + "\n" +
-		"*To:* " + escapeMdV2(mail.To) + "\n"
-	if mail.Cc != "" {
-		headers += "*Cc:* " + escapeMdV2(mail.Cc) + "\n"
-	}
-	headers += "*Subject:* " + escapeMdV2(mail.Subject) + "\n" +
-		"*Time:* " + escapeMdV2(timeStr)
-
-	truncHint := "\n\n\\.\\.\\.✂️ " + escapeMdV2(i18n.Get("msg_truncated", lang))
-
-	var body string
-	if mail.HTML != "" {
-		md, err := htmltomarkdown.ConvertString(mail.HTML)
-		if err == nil {
-			body = cleanMdForTelegram(strings.TrimSpace(md))
-		}
-	}
-
-	// If html2md produced a result, check length
-	if body != "" {
-		full := headers + "\n\n" + body
-		if len(full) <= 4000 {
-			return full
-		}
-		// md too long
-		if strings.TrimSpace(mail.Text) == "" {
-			// No text fallback available, truncate md
-			maxBody := 3800 - len(headers) - len("\n\n")
-			if maxBody > 0 && len(body) > maxBody {
-				body = body[:maxBody]
-				// Fix unclosed bold markers from truncation
-				body = fixUnclosedBold(body)
-			}
-			return headers + "\n\n" + body + truncHint
-		}
-		// Has text, fall through to text fallback
-	}
-
-	// Use plain text
-	textBody := escapeMdV2(mail.Text)
-	full := headers + "\n\n" + textBody
-	if len(full) <= 4000 {
-		return full
-	}
-
-	// Text also too long, truncate
-	maxBody := 3800 - len(headers) - len("\n\n")
-	if maxBody > 0 && len(textBody) > maxBody {
-		textBody = textBody[:maxBody]
-	}
-	return headers + "\n\n" + textBody + truncHint
+	return formatMailNotification(mail, lang, now...).markdownV2()
 }
 
 // escapeMdV2 escapes special characters for Telegram MarkdownV2 parse mode.
@@ -206,183 +133,6 @@ func escapeMdV2(s string) string {
 	return replacer.Replace(s)
 }
 
-// cleanMdForTelegram takes html2md output and makes it Telegram MarkdownV2 compatible:
-// - Removes image syntax ![alt](url) (Telegram can't render images in text)
-// - Strips heading markers (# ## ###) keeping the text
-// - Escapes special chars in plain text segments while preserving [text](url) links
-// - Collapses excessive blank lines
-func cleanMdForTelegram(md string) string {
-	// Remove images (tracking pixels, logos, etc.)
-	md = mdImageRegex.ReplaceAllString(md, "")
-
-	// Remove empty-text links [](url) — leftover from image-in-link patterns like [![](img)](link)
-	md = emptyLinkRegex.ReplaceAllString(md, "")
-
-	// Remove zero-width/invisible characters (preheader padding junk)
-	md = zeroWidthRegex.ReplaceAllString(md, "")
-
-	// Remove heading markers, keep text
-	md = mdHeadingRegex.ReplaceAllString(md, "")
-
-	// Remove lines that are only whitespace (U+2002, U+00A0, regular spaces, tabs)
-	lines := strings.Split(md, "\n")
-	var cleaned []string
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		// Skip lines that are only invisible/whitespace chars
-		if trimmed == "" || trimmed == "‌" || strings.Trim(trimmed, " \t\u00A0\u2002\u2003\u200B‌") == "" {
-			cleaned = append(cleaned, "")
-		} else {
-			cleaned = append(cleaned, line)
-		}
-	}
-	md = strings.Join(cleaned, "\n")
-
-	// Collapse 3+ consecutive newlines into 2
-	for strings.Contains(md, "\n\n\n") {
-		md = strings.ReplaceAll(md, "\n\n\n", "\n\n")
-	}
-
-	md = strings.TrimSpace(md)
-
-	// Now we need to escape special chars for MarkdownV2, but preserve [text](url) links.
-	return escapeMdV2PreserveLinks(md)
-}
-
-// linkRegex matches Markdown links [text](url)
-var linkRegex = regexp.MustCompile(`\[([^\]]+)\]\(([^\)]+)\)`)
-
-// boldRegex matches **text** (bold in Markdown, also bold in Telegram MarkdownV2)
-var boldRegex = regexp.MustCompile(`\*\*([^\*]+)\*\*`)
-
-// italicRegex matches *text* (italic in Markdown, also italic in Telegram MarkdownV2)
-var italicRegex = regexp.MustCompile(`(?:^|[^*])\*([^*]+)\*(?:[^*]|$)`)
-
-// mdFormattingRegex matches all Markdown formatting we want to preserve: **bold**, *italic*, [link](url)
-// We process them in order of appearance to handle interleaving correctly.
-var mdTokenRegex = regexp.MustCompile(`\*\*[^\*]+\*\*|\[[^\]]+\]\([^\)]+\)`)
-
-// escapeMdV2PreserveFormatting escapes MarkdownV2 special chars but keeps
-// **bold**, *italic* (single), and [text](url) links intact.
-func escapeMdV2PreserveLinks(s string) string {
-	var result strings.Builder
-	lastIdx := 0
-
-	matches := mdTokenRegex.FindAllStringIndex(s, -1)
-	for _, match := range matches {
-		// Escape text before this token
-		if match[0] > lastIdx {
-			segment := s[lastIdx:match[0]]
-			result.WriteString(escapeMdV2KeepSingleBold(segment))
-		}
-		token := s[match[0]:match[1]]
-		if strings.HasPrefix(token, "[") {
-			// It's a link [text](url)
-			// Extract text and url
-			submatches := linkRegex.FindStringSubmatch(token)
-			if len(submatches) == 3 {
-				result.WriteString("[")
-				result.WriteString(escapeMdV2KeepSingleBold(submatches[1]))
-				result.WriteString("](")
-				result.WriteString(submatches[2])
-				result.WriteString(")")
-			} else {
-				result.WriteString(escapeMdV2KeepSingleBold(token))
-			}
-		} else if strings.HasPrefix(token, "**") {
-			// It's bold **text**
-			inner := token[2 : len(token)-2]
-			result.WriteString("*")
-			result.WriteString(escapeMdV2NoBold(inner))
-			result.WriteString("*")
-		}
-		lastIdx = match[1]
-	}
-	// Escape remaining text
-	if lastIdx < len(s) {
-		result.WriteString(escapeMdV2KeepSingleBold(s[lastIdx:]))
-	}
-	return result.String()
-}
-
-// singleBoldRegex matches *text* that is NOT part of **text**
-var singleBoldRegex = regexp.MustCompile(`(?:^|[^*])\*([^*]+)\*(?:[^*]|$)`)
-
-// escapeMdV2KeepSingleBold escapes all MdV2 special chars except preserves *text* as bold.
-func escapeMdV2KeepSingleBold(s string) string {
-	// Find *text* patterns (single asterisk bold/italic)
-	var result strings.Builder
-	lastIdx := 0
-
-	// Simple approach: find pairs of single * that are not **
-	inBold := false
-	runes := []byte(s)
-	i := 0
-	segStart := 0
-
-	for i < len(runes) {
-		if runes[i] == '*' {
-			// Check if it's ** (already handled by outer function)
-			if i+1 < len(runes) && runes[i+1] == '*' {
-				i += 2
-				continue
-			}
-			if !inBold {
-				// Opening *: escape everything before it
-				result.WriteString(escapeMdV2NoBold(s[segStart:i]))
-				result.WriteString("*")
-				inBold = true
-				segStart = i + 1
-			} else {
-				// Closing *: escape inner content, close bold
-				result.WriteString(escapeMdV2NoBold(s[segStart:i]))
-				result.WriteString("*")
-				inBold = false
-				segStart = i + 1
-			}
-		}
-		i++
-	}
-	// Remaining text
-	if segStart < len(s) {
-		if inBold {
-			// Unclosed *, treat the opening * as literal
-			result.WriteString(escapeMdV2NoBold("*" + s[segStart:]))
-		} else {
-			result.WriteString(escapeMdV2NoBold(s[segStart:]))
-		}
-	}
-	_ = lastIdx
-	return result.String()
-}
-
-// escapeMdV2NoBold escapes all MarkdownV2 special characters including *.
-func escapeMdV2NoBold(s string) string {
-	return escapeMdV2(s)
-}
-
-// fixUnclosedBold checks if a truncated MarkdownV2 string has an odd number of
-// unescaped * markers (meaning a bold/italic was cut in half). If so, removes
-// the last unmatched * to prevent Telegram parse errors.
-func fixUnclosedBold(s string) string {
-	count := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == '*' && (i == 0 || s[i-1] != '\\') {
-			count++
-		}
-	}
-	if count%2 == 0 {
-		return s // balanced
-	}
-	// Remove the last unescaped *
-	for i := len(s) - 1; i >= 0; i-- {
-		if s[i] == '*' && (i == 0 || s[i-1] != '\\') {
-			return s[:i] + s[i+1:]
-		}
-	}
-	return s
-}
-
 // HandleMail processes an incoming email: looks up the recipient domain,
 // checks block lists, formats and sends the message via Telegram bot.
 // Corresponds to the mailin.on('message', ...) handler in Node version io.js.
@@ -401,9 +151,9 @@ func (o *IO) HandleMail(mail *smtpmod.ParsedMail) {
 func (o *IO) handleMailDelivery(mail *smtpmod.ParsedMail, delivery mailDelivery) {
 	tgID := delivery.tgID
 
-	// Format email message using FormatMailNotification with user's language preference
+	// Build the notification using the user's language preference.
 	lang := o.GetUserLang(tgID)
-	email := o.FormatMailNotification(mail, lang)
+	email := formatMailNotification(mail, lang)
 
 	keyboard := o.mailActionKeyboard(delivery)
 

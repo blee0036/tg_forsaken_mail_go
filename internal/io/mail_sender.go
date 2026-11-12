@@ -14,11 +14,10 @@ func (o *IO) deliverMailToSender(
 	delivery mailDelivery,
 	sender TelegramSender,
 	botName string,
-	formattedMail string,
+	formattedMail mailContent,
 	keyboard tgbotapi.InlineKeyboardMarkup,
 ) bool {
-	message := tgbotapi.NewMessage(delivery.tgID, formattedMail)
-	message.ParseMode = "MarkdownV2"
+	message := formattedMail.message(delivery.tgID)
 	message.ReplyMarkup = keyboard
 	if err := o.sendMailMessageWithRetry(sender, botName, message); err != nil {
 		log.Printf("[%s] mail delivery stopped after message failure: %v", botName, err)
@@ -28,6 +27,11 @@ func (o *IO) deliverMailToSender(
 	succeeded := true
 	for _, attachment := range mail.Attachments {
 		if len(attachment.Content) == 0 {
+			continue
+		}
+		if attachment.InlineResource && (mail.HTML != "" || mail.Text != "") {
+			// Newsletter logos and tracking resources must not flood the chat
+			// with documents. Explicit user attachments still go through.
 			continue
 		}
 		document := tgbotapi.NewDocument(delivery.tgID, tgbotapi.FileBytes{
@@ -42,6 +46,24 @@ func (o *IO) deliverMailToSender(
 	}
 
 	if mail.HTML == "" {
+		if formattedMail.truncated {
+			// A text-only mail has no content.html to recover the preview's
+			// omitted text from, so deliver a complete readable copy as well.
+			fullText := "From: " + mail.From + "\nTo: " + mail.To + "\n"
+			if mail.Cc != "" {
+				fullText += "Cc: " + mail.Cc + "\n"
+			}
+			date := mail.RawDate
+			if date == "" {
+				date = mail.Date
+			}
+			fullText += "Subject: " + mail.Subject + "\nTime: " + date + "\n\n" + mail.Text
+			document := tgbotapi.NewDocument(delivery.tgID, tgbotapi.FileBytes{Name: "content.txt", Bytes: []byte(fullText)})
+			if err := o.sendMailWithRetry(sender, botName, "full text document", document); err != nil {
+				log.Printf("[%s] full text document delivery exhausted retries: %v", botName, err)
+				return false
+			}
+		}
 		return succeeded
 	}
 

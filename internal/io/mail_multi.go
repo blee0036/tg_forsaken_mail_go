@@ -12,7 +12,7 @@ import (
 //  1. Parse recipient email to get domain → look up tgID
 //  2. Check block lists (same as HandleMail)
 //  3. Get user language via GetUserLang(tgID)
-//  4. Format notification using FormatMailNotification (uses FormatMailTime internally)
+//  4. Build notification text and entities (uses FormatMailTime internally)
 //  5. For each endpoint: send message, attachments, HTML doc
 //  6. For IsOld endpoints: call sendAlert after successful delivery
 //  7. Failure on one endpoint does not affect others
@@ -48,8 +48,8 @@ func (o *IO) handleMailMultiDelivery(
 	// Step 3: Get user language
 	lang := o.GetUserLang(tgID)
 
-	// Step 4: Format notification (FormatMailNotification uses FormatMailTime internally)
-	email := o.FormatMailNotification(mail, lang, now)
+	// Step 4: Build literal text and formatting, shared with single-bot delivery.
+	email := formatMailNotification(mail, lang, now)
 
 	keyboard := o.mailActionKeyboard(delivery)
 

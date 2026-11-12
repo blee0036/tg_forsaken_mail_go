@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/emersion/go-message"
 	_ "github.com/emersion/go-message/charset" // Register extended charset decoders (gb2312, gbk, big5, etc.)
 	gomail "github.com/emersion/go-message/mail"
 	gosmtp "github.com/emersion/go-smtp"
@@ -36,6 +37,8 @@ type Attachment struct {
 	Filename    string
 	ContentType string
 	Content     []byte
+	// InlineResource marks body resources such as CID logos, not user documents.
+	InlineResource bool
 }
 
 // ParsedMail represents a parsed email message.
@@ -165,16 +168,18 @@ func decodeRFC2047(s string) string {
 // ParseMail parses a MIME message from a reader and returns a ParsedMail struct.
 // This function can be used independently for testing.
 func ParseMail(r io.Reader) (*ParsedMail, error) {
-	mr, err := gomail.CreateReader(r)
+	entity, err := message.Read(r)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create mail reader: %w", err)
+		if entity == nil || (!message.IsUnknownCharset(err) && !message.IsUnknownEncoding(err)) {
+			return nil, fmt.Errorf("failed to create mail reader: %w", err)
+		}
+		logMailError("reading mail with unsupported encoding: %v", err)
 	}
-	defer mr.Close()
 
 	parsed := &ParsedMail{}
 
 	// Extract headers
-	header := mr.Header
+	header := gomail.Header{Header: entity.Header}
 
 	parsed.From = displayAddressHeader(header, "From")
 	parsed.To = displayAddressHeader(header, "To")
@@ -198,48 +203,14 @@ func ParseMail(r io.Reader) (*ParsedMail, error) {
 		parsed.Date = header.Get("Date")
 	}
 
-	// Parse body parts and attachments
-	// Limit iterations to prevent infinite loops on malformed messages
-	const maxParts = 100
-	for i := 0; i < maxParts; i++ {
-		part, err := mr.NextPart()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			logMailError("error reading mail part: %v", err)
-			break
-		}
-
-		switch h := part.Header.(type) {
-		case *gomail.InlineHeader:
-			contentType := h.Get("Content-Type")
-			body, err := io.ReadAll(part.Body)
-			if err != nil {
-				logMailError("error reading inline part: %v", err)
-				continue
-			}
-			if strings.HasPrefix(contentType, "text/html") {
-				parsed.HTML = string(body)
-			} else {
-				// text/plain or default
-				parsed.Text = string(body)
-			}
-		case *gomail.AttachmentHeader:
-			filename, _ := h.Filename()
-			contentType := h.Get("Content-Type")
-			body, err := io.ReadAll(part.Body)
-			if err != nil {
-				logMailError("error reading attachment: %v", err)
-				continue
-			}
-			parsed.Attachments = append(parsed.Attachments, Attachment{
-				Filename:    filename,
-				ContentType: contentType,
-				Content:     body,
-			})
-		}
+	parts := 0
+	body, err := readMIMEBody(entity, &parts, false)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse mail body: %w", err)
 	}
+	parsed.Text = body.text
+	parsed.HTML = body.html
+	parsed.Attachments = body.attachments
 
 	return parsed, nil
 }

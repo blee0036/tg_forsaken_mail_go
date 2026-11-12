@@ -14,7 +14,7 @@ permissions:
   pull-requests: write
 
 env:
-  GOVULNCHECK_VERSION: v1.6.0
+  GOVULNCHECK_VERSION: v1.9.0
 
 jobs:
   scan-and-upgrade:
@@ -24,12 +24,12 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
@@ -46,7 +46,7 @@ jobs:
           set -euo pipefail
 
           report="$RUNNER_TEMP/govulncheck-before.json"
-          govulncheck -json ./... > "$report"
+          govulncheck -C cmd/bot -scan=module -json > "$report"
 
           declare -A upgrades=()
           while IFS='@' read -r module version; do
@@ -86,15 +86,27 @@ jobs:
           } || true)"
 
           if [[ -n "$stdlib_fix" ]]; then
-            echo "Upgrading the Go toolchain requirement to $stdlib_fix"
-            go mod edit -go="$stdlib_fix"
-            export GOTOOLCHAIN="go${stdlib_fix}+auto"
-            echo "GOTOOLCHAIN=go${stdlib_fix}+auto" >> "$GITHUB_ENV"
+            # The database may report a fix on an older Go release line.
+            # Choose the latest supported stable release, never downgrade.
+            latest_go="$(curl --fail --silent --show-error --location 'https://go.dev/dl/?mode=json' \
+              | jq -er '[.[] | select(.stable)] | first | .version | ltrimstr("go")')"
+            current_go="$(awk '$1 == "go" {print $2}' go.mod)"
+            newest="$(printf '%s\n' "$current_go" "$latest_go" | sort -V | tail -n 1)"
+            if [[ "$newest" != "$current_go" ]]; then
+              echo "Upgrading the Go toolchain requirement to $newest"
+              go mod edit -go="$newest"
+            fi
           fi
 
           go mod tidy
+          go_version="$(awk '$1 == "go" {print $2}' go.mod)"
+          sed -i "s/^ARG GO_VERSION=.*/ARG GO_VERSION=${go_version}/" Dockerfile
+          # A Go upgrade can require rebuilding the scanner with the new SDK.
+          export GOTOOLCHAIN="go${go_version}+auto"
+          echo "GOTOOLCHAIN=go${go_version}+auto" >> "$GITHUB_ENV"
+          go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
 
-          if git diff --quiet -- go.mod go.sum; then
+          if git diff --quiet -- go.mod go.sum Dockerfile; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
@@ -102,14 +114,16 @@ jobs:
 
       - name: Run tests after upgrades
         if: steps.upgrade.outputs.changed == 'true'
-        run: go test -count=1 ./...
+        run: |
+          go test -race -count=1 ./...
+          CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/mail-bot" ./cmd/bot
 
       - name: Verify vulnerabilities are fixed
-        run: govulncheck ./...
+        run: govulncheck -C cmd/bot -scan=module
 
       - name: Create dependency security pull request
         if: steps.upgrade.outputs.changed == 'true'
-        uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676 # v7
+        uses: peter-evans/create-pull-request@3ffccacd46053766916f087ce41d627c0b8cf2d1 # v8.1.3
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           branch: automation/dependency-security-updates
@@ -117,6 +131,7 @@ jobs:
           add-paths: |
             go.mod
             go.sum
+            Dockerfile
           commit-message: 'chore(deps): upgrade vulnerable Go dependencies'
           title: 'chore(deps): upgrade vulnerable Go dependencies'
           body: |

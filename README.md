@@ -14,11 +14,32 @@ A self-hosted email-to-Telegram forwarding service written in Go. Receives email
 - Optional HTML email upload / 可选的 HTML 邮件上传
 - Admin broadcast / 管理员广播
 
+### Email previews / 邮件预览
+
+Mail previews preserve headings, paragraphs, lists, code and clickable link labels. Long tracking URLs stay behind the labels instead of filling the message. Formatting uses Telegram text entities, so email punctuation is not interpreted as Markdown; a formatting rejection falls back to the same readable text.
+
+邮件预览保留标题、段落、列表、代码和可点击的链接文字，长追踪地址不会铺满正文。推送使用 Telegram 文本实体，邮件中的符号不会被当作 Markdown 解析；格式被拒绝时，也会降级为同一份干净正文。
+
+The preview fits Telegram's 4096-unit UTF-16 limit without cutting a Chinese character or emoji sequence. Full HTML remains available as `content.html` (and through **View Directly** when HTML upload is configured). Truncated text-only mail includes a complete `content.txt`; regular attachments are still delivered separately.
+
+预览按 Telegram 的 UTF-16 长度规则限制在 4096 单位内，不切坏中文或 emoji 序列。完整 HTML 仍通过 `content.html` 提供，配置上传后也可点击 **View Directly** 查看。纯文本长邮件截断时会附上完整 `content.txt`；普通附件仍单独发送。
+
 ## Requirements / 前置条件
 
+- For source builds, use the Go version declared in `go.mod` or newer / 从源码构建时，使用 `go.mod` 声明版本或更高版本的 Go
 - A domain with MX record pointing to your server / 一个 MX 记录指向你服务器的域名
 - Port 25 open (SMTP) / 端口 25 开放
 - A Telegram Bot token from [@BotFather](https://t.me/BotFather) / 从 @BotFather 获取 Bot Token
+
+## Security maintenance / 安全维护
+
+Pull requests and pushes to `main` run tests, race checks, a CGO-free build, and module-level `govulncheck` scanning. Docker releases must pass the same checks before publishing, and use the Go version from `go.mod`. Docker base images are versioned rather than using `latest`; the runtime also installs available Alpine package fixes during the build.
+
+PR 和推送到 `main` 的提交会运行测试、竞态检查、无 CGO 构建，以及模块级 `govulncheck` 扫描。Docker 发布必须通过同样的检查，并使用 `go.mod` 中的 Go 版本。基础镜像固定版本，不再使用 `latest`；构建时也会安装 Alpine 可用的系统包修复。
+
+Dependabot opens weekly updates for Go dependencies, GitHub Actions and the runtime base image. Actions are pinned to release commit SHAs. The scheduled security workflow opens additional PRs for known Go/module vulnerabilities and keeps the Docker builder's default Go version in sync. Enable **Allow GitHub Actions to create and approve pull requests** in repository Actions settings for that workflow to open PRs.
+
+Dependabot 每周为 Go 依赖、GitHub Actions 和运行时基础镜像创建更新 PR，Actions 固定到发布版提交 SHA。定时安全工作流另外为已知 Go／模块漏洞生成修复 PR，并同步 Docker 构建器的默认 Go 版本。该工作流创建 PR 需要在仓库 Actions 设置中启用 **Allow GitHub Actions to create and approve pull requests**。
 
 ## DNS Setup / DNS 设置
 
